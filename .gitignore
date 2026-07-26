@@ -1,0 +1,12 @@
+config.env
+data/gsheets_service_account.json
+data/topic_backlog.csv
+data/drafts/
+data/generated_images/
+venv/
+build/
+dist/
+*.spec
+__pycache__/
+*.pyc
+.DS_Store

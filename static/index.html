@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>BlogHero</title>
+<link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+
+<div id="app">
+
+  <!-- ============ TOP BAR ============ -->
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">BH</span>
+      <span class="brand-name">BlogHero</span>
+    </div>
+    <div class="topbar-status" id="topbar-status"></div>
+  </header>
+
+  <!-- ============ SETUP WIZARD (shown only if setup incomplete) ============ -->
+  <section id="wizard-screen" class="screen hidden">
+    <div class="wizard-shell">
+      <div class="wizard-steps-nav" id="wizard-steps-nav"></div>
+      <div class="wizard-panel">
+        <div id="wizard-step-content"></div>
+        <div class="wizard-actions">
+          <button id="wizard-back" class="btn btn-ghost">Back</button>
+          <button id="wizard-next" class="btn btn-primary">Next</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ DASHBOARD (shown once setup is complete) ============ -->
+  <section id="dashboard-screen" class="screen hidden">
+    <div class="dashboard-grid">
+
+      <div class="panel panel-actions">
+        <h2>Run</h2>
+        <p class="muted">Pull fresh opportunities from Search Console, or draft posts for whatever's queued.</p>
+        <div class="run-buttons">
+          <button class="btn btn-primary" id="btn-research">Run Research</button>
+          <button class="btn btn-primary" id="btn-write">Run Write</button>
+          <button class="btn btn-gold" id="btn-run-all">Run Both</button>
+        </div>
+        <button class="btn btn-ghost btn-small" id="btn-open-setup">Edit setup</button>
+      </div>
+
+      <div class="panel panel-log">
+        <h2>Live log</h2>
+        <pre id="log-pane">Waiting for a run...</pre>
+      </div>
+
+      <div class="panel panel-backlog">
+        <h2>Backlog</h2>
+        <div class="table-scroll">
+          <table id="backlog-table">
+            <thead>
+              <tr><th>#</th><th>Type</th><th>Topic</th><th>Category</th><th>Priority</th><th>Status</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="panel panel-drafts">
+        <h2>Drafts</h2>
+        <div id="drafts-list"></div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- Draft preview modal -->
+  <div id="draft-modal" class="modal hidden">
+    <div class="modal-content">
+      <button class="modal-close" id="modal-close">&times;</button>
+      <h3 id="modal-title"></h3>
+      <pre id="modal-body"></pre>
+    </div>
+  </div>
+
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
