@@ -35,6 +35,8 @@ jobs:
           --add-data "static;static"
           --add-data "config.env.example;."
           --add-data "data;data"
+          --collect-all numpy
+          --collect-all pandas
           desktop.py
 
       - name: Upload Windows build
@@ -63,6 +65,8 @@ jobs:
           --add-data "static:static"
           --add-data "config.env.example:."
           --add-data "data:data"
+          --collect-all numpy
+          --collect-all pandas
           desktop.py
 
       - name: Zip the .app bundle
