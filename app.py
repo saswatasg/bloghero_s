@@ -6,22 +6,17 @@ development (`python app.py`, then open http://127.0.0.1:8765), or launched
 inside a native window by desktop.py for the packaged app.
 
 Log streaming design: each research/write run executes as a SEPARATE
-SUBPROCESS (run_pipeline.py), not a background thread. An earlier version
-used contextlib.redirect_stdout() in a background thread to capture the
-existing modules' print() output - that mutates sys.stdout globally for the
-whole process, and running it in a thread while the main thread (serving
-other requests) also touches stdout caused a real, reproducible segfault
-during testing. Subprocess isolation avoids that shared-mutable-state
-problem entirely: the run gets its own real stdout, which this process
-reads line-by-line and forwards to connected dashboard WebSockets.
+PROCESS via `multiprocessing` (pipeline_worker.py), not a background thread
+and not a subprocess.exec(sys.executable, script) call - see
+pipeline_worker.py's docstring for why both of those break in a frozen
+PyInstaller build specifically.
 """
 
 import asyncio
 import csv
+import multiprocessing
 import re
 import shutil
-import sys
-from pathlib import Path
 
 from fastapi import FastAPI, UploadFile, File, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
@@ -29,17 +24,34 @@ from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
 import config_store
+import paths
+import pipeline_worker
 import runner
 
 app = FastAPI(title="BlogHero")
 
-BACKLOG_PATH = Path("data/topic_backlog.csv")
-DRAFTS_DIR = Path("data/drafts")
-STATIC_DIR = Path(__file__).parent / "static"
-PIPELINE_SCRIPT = Path(__file__).parent / "run_pipeline.py"
+BACKLOG_PATH = paths.BACKLOG_PATH
+DRAFTS_DIR = paths.DRAFTS_DIR
+STATIC_DIR = paths.STATIC_DIR
 
 RUN_STATE = {"running": False, "action": None}
 _ws_clients: list[WebSocket] = []
+_main_loop: asyncio.AbstractEventLoop | None = None
+
+
+@app.on_event("startup")
+async def _capture_loop():
+    global _main_loop
+    _main_loop = asyncio.get_running_loop()
+
+    # First-run convenience: put a real, editable copy of the product
+    # catalog template somewhere the user can actually find and edit it -
+    # the bundled .example file lives inside the (possibly read-only,
+    # possibly temporary) app bundle, not a normal folder.
+    user_catalog = paths.DATA_DIR / "product_catalog.csv"
+    bundled_example = paths.RESOURCE_DIR / "data" / "product_catalog.csv.example"
+    if not user_catalog.exists() and bundled_example.exists():
+        shutil.copy(bundled_example, user_catalog.with_suffix(".csv.example"))
 
 
 async def _safe_send(ws: WebSocket, text: str):
@@ -97,26 +109,26 @@ async def save_setup(updates: dict):
 
 @app.post("/api/upload-service-account")
 async def upload_service_account(file: UploadFile = File(...)):
-    config_store.SERVICE_ACCOUNT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(config_store.SERVICE_ACCOUNT_PATH, "wb") as out:
+    paths.SERVICE_ACCOUNT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(paths.SERVICE_ACCOUNT_PATH, "wb") as out:
         shutil.copyfileobj(file.file, out)
 
     client_email = None
     try:
         import json
-        with open(config_store.SERVICE_ACCOUNT_PATH, encoding="utf-8") as f:
+        with open(paths.SERVICE_ACCOUNT_PATH, encoding="utf-8") as f:
             client_email = json.load(f).get("client_email")
     except Exception:
         pass
 
-    config_store.save_config({"GSHEETS_SERVICE_ACCOUNT_FILE": str(config_store.SERVICE_ACCOUNT_PATH)})
+    config_store.save_config({"GSHEETS_SERVICE_ACCOUNT_FILE": str(paths.SERVICE_ACCOUNT_PATH)})
     return {"ok": True, "client_email": client_email}
 
 
 @app.get("/api/gsc-properties")
 async def gsc_properties():
     cfg = config_store.load_config()
-    if not config_store.SERVICE_ACCOUNT_PATH.exists():
+    if not paths.SERVICE_ACCOUNT_PATH.exists():
         return JSONResponse({"error": "No service account file uploaded yet."}, status_code=400)
     try:
         result = await run_in_threadpool(runner.check_gsc, cfg)
@@ -172,26 +184,32 @@ async def draft_content(filename: str):
 # Running the pipeline
 # ---------------------------------------------------------------------------
 
-async def _run_pipeline_subprocess(action: str, cfg: dict):
-    process = await asyncio.create_subprocess_exec(
-        sys.executable, str(PIPELINE_SCRIPT), action,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-        cwd=str(Path(__file__).parent),
-    )
-    try:
+async def _run_pipeline_process(action: str):
+    manager = multiprocessing.Manager()
+    queue = manager.Queue()
+    process = multiprocessing.Process(target=pipeline_worker.worker_entry, args=(action, queue))
+    process.start()
+
+    def _drain_queue():
+        """Runs in a thread pool worker - blocking queue.get() calls are fine
+        here since this thread does nothing else and never touches sys.stdout."""
         while True:
-            line = await process.stdout.readline()
-            if not line:
+            item = queue.get()
+            if item is None:
                 break
-            text = line.decode(errors="replace")
-            sys.__stdout__.write(text)
-            for ws in list(_ws_clients):
-                await _safe_send(ws, text)
-        await process.wait()
-    finally:
-        RUN_STATE["running"] = False
-        RUN_STATE["action"] = None
+            if _main_loop is not None:
+                asyncio.run_coroutine_threadsafe(_broadcast(item), _main_loop)
+
+    await run_in_threadpool(_drain_queue)
+    await run_in_threadpool(process.join)
+    RUN_STATE["running"] = False
+    RUN_STATE["action"] = None
+
+
+async def _broadcast(text: str):
+    print(text, end="")
+    for ws in list(_ws_clients):
+        await _safe_send(ws, text)
 
 
 @app.post("/api/run/{action}")
@@ -203,10 +221,9 @@ async def start_run(action: str):
     if config_store.needs_setup():
         return JSONResponse({"error": "Setup isn't complete yet"}, status_code=400)
 
-    cfg = config_store.load_config()
     RUN_STATE["running"] = True
     RUN_STATE["action"] = action
-    asyncio.create_task(_run_pipeline_subprocess(action, cfg))
+    asyncio.create_task(_run_pipeline_process(action))
     return {"ok": True, "action": action}
 
 

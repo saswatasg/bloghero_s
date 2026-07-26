@@ -20,7 +20,9 @@ from pathlib import Path
 from google import genai
 from google.genai import types
 
-CATALOG_PATH = Path("data/product_catalog.csv")
+import paths
+
+CATALOG_PATH = paths.DATA_DIR / "product_catalog.csv"
 
 
 def load_catalog() -> list:
@@ -75,8 +77,9 @@ def generate_ai_image(api_key: str, model_name: str, prompt: str, out_path: str)
 
 
 def select_images_for_post(api_key: str, image_model: str, topic: str, category: str,
-                            out_dir: str = "data/generated_images") -> dict:
+                            out_dir: str = None) -> dict:
     """Returns {"hero_image": path_or_url, "source": "product"|"ai_generated", "product_links": [...]}"""
+    out_dir = out_dir or str(paths.GENERATED_IMAGES_DIR)
     Path(out_dir).mkdir(parents=True, exist_ok=True)
     matches = find_matching_products(topic, category)
     if matches:

@@ -10,11 +10,12 @@ can never drift out of sync with each other.
 """
 
 import re
-from pathlib import Path
 
-CONFIG_PATH = Path("config.env")
-TEMPLATE_PATH = Path("config.env.example")
-SERVICE_ACCOUNT_PATH = Path("data/gsheets_service_account.json")
+import paths
+
+CONFIG_PATH = paths.CONFIG_PATH
+TEMPLATE_PATH = paths.CONFIG_TEMPLATE_PATH
+SERVICE_ACCOUNT_PATH = paths.SERVICE_ACCOUNT_PATH
 
 # Fields the wizard should mask when displaying back to the user (never echo
 # a secret into the UI once it's saved - show a placeholder instead).

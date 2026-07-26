@@ -9,17 +9,17 @@ live log panel.
 """
 
 import csv
-from pathlib import Path
 
 import content_writer
 import gsc_client
 import image_handler
+import paths
 import research
 import sheets_logger
 import wordpress_publisher
 
-BACKLOG_PATH = Path("data/topic_backlog.csv")
-DRAFTS_DIR = Path("data/drafts")
+BACKLOG_PATH = paths.BACKLOG_PATH
+DRAFTS_DIR = paths.DRAFTS_DIR
 
 
 def _load_queued_topics(limit: int) -> list:

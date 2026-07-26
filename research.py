@@ -15,11 +15,12 @@ Produces two kinds of backlog items:
 import csv
 import os
 from datetime import datetime
-from pathlib import Path
 
 import pandas as pd
 
-BACKLOG_PATH = Path("data/topic_backlog.csv")
+import paths
+
+BACKLOG_PATH = paths.BACKLOG_PATH
 BACKLOG_FIELDS = [
     "id", "type", "topic_or_page", "category", "priority", "clicks",
     "impressions", "ctr", "position", "evidence", "status", "date_added",

@@ -34,19 +34,45 @@ plain-English explanations and links to exactly where to go.
   (on a GitHub-hosted Mac machine) automatically, with no Python installed
   needed on your end at all - not for building, and not for using the result.
 
-### Why a subprocess instead of a background thread
-An earlier version of this ran each research/write job in a background
-thread and captured its `print()` output via `contextlib.redirect_stdout()`
-to stream into the dashboard's live log. That's a real bug, not just a style
-choice: `redirect_stdout` swaps `sys.stdout` **globally for the entire
-process**, not just the calling thread. Running that in a background thread
-while the main thread (serving other dashboard requests) also touches
-stdout caused a reproducible segfault during testing. Running each pipeline
-job as a separate subprocess instead means it gets its own real stdout, with
-nothing shared to race on - `app.py` just reads that subprocess's output
-line by line and forwards it to the dashboard's WebSocket. Confirmed this
-actually fixes it by reproducing the crash, then re-running the identical
-scenario after the fix with a clean exit.
+### Two bugs found only after the first real build ran on actual hardware
+
+**1. Frozen apps can't subprocess `sys.executable script.py`.** The first
+version ran each research/write job as a separate subprocess
+(`subprocess.exec(sys.executable, "run_pipeline.py", action)`) to avoid a
+different bug (see below). That's correct in development, where
+`sys.executable` is a real Python interpreter - but inside a
+PyInstaller-frozen app, `sys.executable` **is the packaged app itself**,
+with no separate interpreter to hand a script filename to. Switched to
+Python's `multiprocessing` module instead (`pipeline_worker.py` +
+`multiprocessing.Process`), which is what PyInstaller explicitly documents
+support for (`multiprocessing.freeze_support()` in `desktop.py`'s entry
+point). Log streaming still works the same way from the dashboard's point
+of view - the worker process pushes lines onto a `multiprocessing.Queue`
+instead of a stdout pipe, and a background thread drains that queue and
+forwards to the WebSocket.
+
+**2. Relative paths ("config.env", "data/...") don't mean anything
+predictable once double-clicked from Finder/Explorer.** Everything
+originally assumed it could read/write files relative to "wherever the app
+happens to be running from" - fine for `python app.py` in a project folder,
+not fine for a packaged app launched by double-clicking, where the working
+directory is unpredictable and may not even be writable. Added
+**`paths.py`**, which splits every path into two categories: bundled
+read-only resources (resolved via PyInstaller's `sys._MEIPASS` when frozen)
+and user-writable data (`config.env`, the backlog, saved drafts, the Google
+service account key), which now go to the standard per-OS app-data folder
+(`~/Library/Application Support/BlogHero` on Mac, `%APPDATA%\BlogHero` on
+Windows) instead of next to the app.
+
+Why the original thread-based design was replaced with subprocess (and then
+subprocess with multiprocessing): an even earlier version ran each job in a
+background **thread** and captured its `print()` output via
+`contextlib.redirect_stdout()`. That call swaps `sys.stdout` **globally for
+the entire process**, not just the calling thread - running that in a
+background thread while the main thread (serving other dashboard requests)
+also touches stdout caused a reproducible segfault. Both later designs
+(subprocess, then multiprocessing) exist specifically to give each run its
+own private stdout with nothing shared to race on.
 
 ---
 

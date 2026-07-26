@@ -20,6 +20,7 @@ check:
      backend or the pywebview wrapper specifically.
 """
 
+import multiprocessing
 import platform
 import socket
 import threading
@@ -75,4 +76,5 @@ def main():
 
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()  # required for multiprocessing inside a frozen app (esp. Windows)
     main()
