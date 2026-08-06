@@ -167,6 +167,28 @@ function renderField(field) {
   label.textContent = field.label + (field.required ? " *" : "");
   wrap.appendChild(label);
 
+  if (field.type === "select") {
+    const select = document.createElement("select");
+    select.id = "field_" + field.key;
+    (field.options || []).forEach((opt) => {
+      const o = document.createElement("option");
+      o.value = opt.value;
+      o.textContent = opt.label;
+      select.appendChild(o);
+    });
+    const existingVal = state.values[field.key] || field.default;
+    if (existingVal) select.value = existingVal;
+    wrap.appendChild(select);
+
+    if (field.help) {
+      const help = document.createElement("div");
+      help.className = "field-help";
+      help.textContent = field.help;
+      wrap.appendChild(help);
+    }
+    return wrap;
+  }
+
   const input = document.createElement("input");
   input.type = field.secret ? "password" : "text";
   input.id = "field_" + field.key;
@@ -236,6 +258,11 @@ async function collectStepValues(step) {
     }
     if (field.type === "gsc_picker") {
       if (state.values[field.key]) updates[field.key] = state.values[field.key];
+      continue;
+    }
+    if (field.type === "select") {
+      const select = $("#field_" + field.key);
+      if (select) updates[field.key] = select.value;
       continue;
     }
     const input = $("#field_" + field.key);
@@ -381,6 +408,85 @@ async function refreshDrafts() {
 $("#modal-close").addEventListener("click", () => $("#draft-modal").classList.add("hidden"));
 $("#draft-modal").addEventListener("click", (e) => {
   if (e.target.id === "draft-modal") $("#draft-modal").classList.add("hidden");
+});
+
+// ---------------------------------------------------------------------
+// Credentials export/import - "run BlogHero on any PC"
+// ---------------------------------------------------------------------
+const importInput = $("#import-credentials-input");
+if (importInput) {
+  importInput.addEventListener("change", async () => {
+    if (!importInput.files.length) return;
+    const status = $("#import-credentials-status");
+    status.textContent = "Importing...";
+    const formData = new FormData();
+    formData.append("file", importInput.files[0]);
+    try {
+      const result = await api("/api/import-credentials", { method: "POST", body: formData });
+      status.textContent = "Imported. Loading...";
+      if (!result.needs_setup) {
+        showDashboard();
+      } else {
+        status.textContent = "Imported, but a few required fields are still missing - check the wizard below.";
+        state.schema = await api("/api/setup-schema");
+        const st = await api("/api/status");
+        state.values = st.config || {};
+        state.stepIndex = 0;
+        renderWizardStep();
+      }
+    } catch (err) {
+      status.textContent = "Import failed: " + err.message;
+    }
+    importInput.value = "";
+  });
+}
+
+const exportBtn = $("#btn-export-creds");
+if (exportBtn) {
+  exportBtn.addEventListener("click", () => {
+    window.location.href = "/api/export-credentials";
+  });
+}
+
+// ---------------------------------------------------------------------
+// Add topic manually
+// ---------------------------------------------------------------------
+const addTopicBtn = $("#btn-add-topic");
+if (addTopicBtn) {
+  addTopicBtn.addEventListener("click", () => {
+    $("#add-topic-input").value = "";
+    $("#add-topic-error").textContent = "";
+    $("#add-topic-modal").classList.remove("hidden");
+    $("#add-topic-input").focus();
+  });
+}
+$("#add-topic-close").addEventListener("click", () => $("#add-topic-modal").classList.add("hidden"));
+$("#add-topic-modal").addEventListener("click", (e) => {
+  if (e.target.id === "add-topic-modal") $("#add-topic-modal").classList.add("hidden");
+});
+$("#add-topic-submit").addEventListener("click", async () => {
+  const topic = $("#add-topic-input").value.trim();
+  const errBox = $("#add-topic-error");
+  errBox.textContent = "";
+  if (!topic) {
+    errBox.textContent = "Enter a topic first.";
+    return;
+  }
+  try {
+    await api("/api/backlog", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        topic,
+        category: $("#add-topic-category").value,
+        priority: $("#add-topic-priority").value,
+      }),
+    });
+    $("#add-topic-modal").classList.add("hidden");
+    refreshBacklog();
+  } catch (err) {
+    errBox.textContent = err.message;
+  }
 });
 
 boot();

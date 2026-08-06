@@ -21,6 +21,17 @@
 
   <!-- ============ SETUP WIZARD (shown only if setup incomplete) ============ -->
   <section id="wizard-screen" class="screen hidden">
+    <div class="import-banner" id="import-banner">
+      <div>
+        <b>Already have a BlogHero credentials file?</b>
+        <div class="muted">Skip the wizard below - import the .zip someone shared with you and everything fills in automatically.</div>
+      </div>
+      <label class="btn btn-ghost btn-small import-banner-btn">
+        Import credentials
+        <input type="file" id="import-credentials-input" accept=".zip" hidden>
+      </label>
+    </div>
+    <div class="field-help" id="import-credentials-status"></div>
     <div class="wizard-shell">
       <div class="wizard-steps-nav" id="wizard-steps-nav"></div>
       <div class="wizard-panel">
@@ -38,14 +49,40 @@
     <div class="dashboard-grid">
 
       <div class="panel panel-actions">
-        <h2>Run</h2>
-        <p class="muted">Pull fresh opportunities from Search Console, or draft posts for whatever's queued.</p>
-        <div class="run-buttons">
-          <button class="btn btn-primary" id="btn-research">Run Research</button>
-          <button class="btn btn-primary" id="btn-write">Run Write</button>
-          <button class="btn btn-gold" id="btn-run-all">Run Both</button>
+        <h2>Run the pipeline</h2>
+        <p class="muted">Two steps, run in order. Each button explains what it does below it.</p>
+
+        <div class="run-step">
+          <div class="run-step-num">1</div>
+          <div class="run-step-body">
+            <button class="btn btn-primary btn-wide" id="btn-research">Find new topics</button>
+            <div class="run-step-help">
+              Pulls your last 90 days of Search Console data (blog pages only) and adds two kinds of
+              topic to the backlog below: pages getting clicks but no impressions boost (<b>REVIVAL</b>),
+              and real searches with no strong page yet (<b>GAP</b>). Doesn't write anything - just fills the queue.
+            </div>
+          </div>
         </div>
-        <button class="btn btn-ghost btn-small" id="btn-open-setup">Edit setup</button>
+
+        <div class="run-step">
+          <div class="run-step-num">2</div>
+          <div class="run-step-body">
+            <button class="btn btn-primary btn-wide" id="btn-write">Write queued posts</button>
+            <div class="run-step-help">
+              Takes whatever's <b>queued</b> in the backlog (up to your per-run limit) and, for each one,
+              runs: SEO research → draft → fact-check → humanize pass → SEO metadata.
+              Saves as a WordPress <b>draft</b> - never publishes automatically.
+            </div>
+          </div>
+        </div>
+
+        <button class="btn btn-gold btn-wide" id="btn-run-all">Run both, in order</button>
+
+        <div class="panel-actions-footer">
+          <button class="btn btn-ghost btn-small" id="btn-add-topic">+ Add a topic manually</button>
+          <button class="btn btn-ghost btn-small" id="btn-export-creds">Export credentials</button>
+          <button class="btn btn-ghost btn-small" id="btn-open-setup">Edit setup</button>
+        </div>
       </div>
 
       <div class="panel panel-log">
@@ -55,6 +92,7 @@
 
       <div class="panel panel-backlog">
         <h2>Backlog</h2>
+        <p class="muted">Topics waiting to be written, or already drafted. "Add a topic manually" above skips Search Console entirely.</p>
         <div class="table-scroll">
           <table id="backlog-table">
             <thead>
@@ -72,6 +110,42 @@
 
     </div>
   </section>
+
+  <!-- Add-topic modal -->
+  <div id="add-topic-modal" class="modal hidden">
+    <div class="modal-content modal-content-small">
+      <button class="modal-close" id="add-topic-close">&times;</button>
+      <h3>Add a topic manually</h3>
+      <p class="wizard-intro">Skips Search Console - use this when you already know what you want written next.</p>
+      <div class="field">
+        <label>Topic *</label>
+        <input type="text" id="add-topic-input" placeholder="e.g. How to choose a dining table for a small room">
+      </div>
+      <div class="field">
+        <label>Category</label>
+        <select id="add-topic-category">
+          <option>General</option>
+          <option>Dining</option>
+          <option>Bedroom</option>
+          <option>Home Office</option>
+          <option>Outdoor</option>
+          <option>Bar/Kitchen</option>
+          <option>Entryway</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Priority</label>
+        <select id="add-topic-priority">
+          <option>Medium</option>
+          <option>Critical</option>
+          <option>High</option>
+          <option>Low</option>
+        </select>
+      </div>
+      <button class="btn btn-primary btn-wide" id="add-topic-submit">Add to backlog</button>
+      <div class="field-help" id="add-topic-error"></div>
+    </div>
+  </div>
 
   <!-- Draft preview modal -->
   <div id="draft-modal" class="modal hidden">

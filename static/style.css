@@ -63,6 +63,24 @@ body {
 .btn-ghost { background: transparent; color: var(--blue); border: 1.5px solid var(--blue); }
 .btn-ghost:hover { background: var(--light-blue); }
 .btn-small { padding: 6px 12px; font-size: 12px; margin-top: 14px; }
+.btn-wide { width: 100%; text-align: center; display: block; }
+
+/* ---------------- Import banner (wizard) ---------------- */
+.import-banner {
+  max-width: 1200px;
+  margin: 0 auto 14px auto;
+  background: var(--light-gold);
+  border: 1px solid var(--gold);
+  border-radius: 10px;
+  padding: 14px 18px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+.import-banner .muted { margin-top: 2px; }
+.import-banner-btn { cursor: pointer; white-space: nowrap; margin-top: 0; }
+#import-credentials-status { max-width: 1200px; margin: 0 auto 8px auto; padding: 0 2px; }
 
 /* ---------------- Wizard ---------------- */
 .screen { padding: 28px; max-width: 1200px; margin: 0 auto; }
@@ -109,14 +127,16 @@ body {
 .field { margin-bottom: 16px; }
 .field label { display: block; font-size: 13px; font-weight: 600; color: var(--navy); margin-bottom: 4px; }
 .field .field-help { font-size: 11.5px; color: var(--muted); margin-top: 3px; }
-.field input[type="text"], .field input[type="password"], .field input[type="file"] {
+.field input[type="text"], .field input[type="password"], .field input[type="file"], .field select {
   width: 100%;
   padding: 9px 11px;
   border: 1.5px solid var(--grey-border);
   border-radius: 7px;
   font-size: 13.5px;
+  font-family: inherit;
+  background: white;
 }
-.field input:focus { outline: none; border-color: var(--blue); }
+.field input:focus, .field select:focus { outline: none; border-color: var(--blue); }
 .wizard-actions { display: flex; justify-content: space-between; margin-top: 24px; }
 
 .gsc-picker-list { margin-top: 8px; }
@@ -153,6 +173,34 @@ body {
 .panel-drafts { grid-column: 1 / 2; }
 
 .run-buttons { display: flex; gap: 10px; margin: 14px 0 4px 0; flex-wrap: wrap; }
+
+.info-dot {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px; border-radius: 50%;
+  background: var(--light-blue); color: var(--navy);
+  font-size: 11px; font-weight: 700; cursor: help;
+}
+
+.run-step { display: flex; gap: 12px; margin-top: 16px; }
+.run-step-num {
+  flex-shrink: 0; width: 26px; height: 26px; border-radius: 50%;
+  background: var(--navy); color: white; font-weight: 700; font-size: 13px;
+  display: flex; align-items: center; justify-content: center; margin-top: 3px;
+}
+.run-step-body { flex: 1; }
+.run-step-help { font-size: 12px; color: var(--muted); margin-top: 6px; line-height: 1.5; }
+.run-step-help b { color: var(--navy); }
+
+#btn-run-all { margin-top: 22px; }
+
+.panel-actions-footer {
+  display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px;
+  padding-top: 14px; border-top: 1px solid var(--grey-border);
+}
+.panel-actions-footer .btn { margin-top: 0; }
+
+.modal-content-small { width: 420px; }
+.modal-content-small .field { margin-bottom: 14px; }
 
 #log-pane {
   background: #10182A;

@@ -14,18 +14,22 @@ PyInstaller build specifically.
 
 import asyncio
 import csv
+import io
 import multiprocessing
 import re
 import shutil
+import zipfile
+from pathlib import Path
 
 from fastapi import FastAPI, UploadFile, File, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
 import config_store
 import paths
 import pipeline_worker
+import research
 import runner
 
 app = FastAPI(title="BlogHero")
@@ -138,6 +142,68 @@ async def gsc_properties():
 
 
 # ---------------------------------------------------------------------------
+# Credentials export/import - "run BlogHero on any PC"
+#
+# Everything the app needs to run (config.env, including all API keys, plus
+# the Google service account JSON) lives in paths.DATA_DIR. Zipping that up
+# lets someone hand off a single file alongside the BlogHero app itself and
+# have it work immediately on another machine, with no re-typing of keys.
+#
+# This intentionally includes secrets in plain text inside the zip - same
+# trust model as sharing config.env directly. Only share this file the same
+# way you'd share a password: not over public/unencrypted channels.
+# ---------------------------------------------------------------------------
+
+@app.get("/api/export-credentials")
+async def export_credentials():
+    if not paths.CONFIG_PATH.exists():
+        return JSONResponse({"error": "Nothing to export yet - finish setup first."}, status_code=400)
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.write(paths.CONFIG_PATH, arcname="config.env")
+        if paths.SERVICE_ACCOUNT_PATH.exists():
+            zf.write(paths.SERVICE_ACCOUNT_PATH, arcname="gsheets_service_account.json")
+        readme = (
+            "BlogHero credentials bundle\n"
+            "----------------------------\n"
+            "Contains config.env and (if present) the Google service account key.\n"
+            "This includes API keys and other secrets in plain text.\n\n"
+            "To use on another PC: install BlogHero, open it once (it'll show the setup\n"
+            "wizard), then instead of filling the wizard, go to Setup > Import credentials\n"
+            "and pick this zip file. Everything will be filled in automatically.\n"
+        )
+        zf.writestr("README.txt", readme)
+    buf.seek(0)
+    return StreamingResponse(
+        buf, media_type="application/zip",
+        headers={"Content-Disposition": "attachment; filename=bloghero_credentials.zip"},
+    )
+
+
+@app.post("/api/import-credentials")
+async def import_credentials(file: UploadFile = File(...)):
+    try:
+        contents = await file.read()
+        with zipfile.ZipFile(io.BytesIO(contents)) as zf:
+            names = zf.namelist()
+            if "config.env" not in names:
+                return JSONResponse({"error": "That zip doesn't contain a config.env - is this a BlogHero credentials bundle?"}, status_code=400)
+            paths.DATA_DIR.mkdir(parents=True, exist_ok=True)
+            with zf.open("config.env") as src, open(paths.CONFIG_PATH, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+            if "gsheets_service_account.json" in names:
+                paths.SERVICE_ACCOUNT_PATH.parent.mkdir(parents=True, exist_ok=True)
+                with zf.open("gsheets_service_account.json") as src, open(paths.SERVICE_ACCOUNT_PATH, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+        return {"ok": True, "needs_setup": config_store.needs_setup()}
+    except zipfile.BadZipFile:
+        return JSONResponse({"error": "That file isn't a valid zip."}, status_code=400)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+# ---------------------------------------------------------------------------
 # Backlog / drafts
 # ---------------------------------------------------------------------------
 
@@ -147,6 +213,22 @@ async def backlog():
         return []
     with open(BACKLOG_PATH, newline="", encoding="utf-8") as f:
         return list(csv.DictReader(f))
+
+
+@app.post("/api/backlog")
+async def add_topic(payload: dict):
+    """Manual 'Add topic' button on the dashboard - queues a topic directly,
+    skipping Search Console entirely. See research.add_manual_topic()."""
+    topic = (payload.get("topic") or "").strip()
+    if not topic:
+        return JSONResponse({"error": "Topic can't be empty."}, status_code=400)
+    result = await run_in_threadpool(
+        research.add_manual_topic, topic,
+        payload.get("category", "General"), payload.get("priority", "Medium"),
+    )
+    if not result.get("ok"):
+        return JSONResponse({"error": result.get("error", "Couldn't add that topic.")}, status_code=400)
+    return result
 
 
 @app.get("/api/drafts")

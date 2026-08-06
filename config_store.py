@@ -19,7 +19,7 @@ SERVICE_ACCOUNT_PATH = paths.SERVICE_ACCOUNT_PATH
 
 # Fields the wizard should mask when displaying back to the user (never echo
 # a secret into the UI once it's saved - show a placeholder instead).
-SECRET_FIELDS = {"GEMINI_API_KEY", "WP_APP_PASSWORD"}
+SECRET_FIELDS = {"GEMINI_API_KEY", "WP_APP_PASSWORD", "ANTHROPIC_API_KEY"}
 
 REQUIRED_FIELDS = ["GEMINI_API_KEY", "GSC_SITE_URL", "GSHEETS_SERVICE_ACCOUNT_FILE"]
 
@@ -33,13 +33,18 @@ SETUP_STEPS = [
              "help": "No https:// - just the domain."},
             {"key": "SITE_BASE_URL", "label": "Full website URL", "default": "https://www.sierralivingconcepts.com",
              "help": ""},
+            {"key": "SITE_BLOG_PATH", "label": "Blog path", "default": "/blog/",
+             "help": "This tool only ever writes blog posts. Research is scoped to pages whose "
+                     "URL contains this - so product pages, category pages etc. are never pulled in "
+                     "as topics. Change it if your blog lives somewhere other than /blog/."},
         ],
     },
     {
         "id": "gemini",
         "title": "Gemini API key",
-        "intro": "This is what drafts the blog posts and generates fallback images. Free to get, "
-                 "with usage limits on the free tier.",
+        "intro": "This is what powers the SEO research step (always Gemini) and generates fallback "
+                 "images. Also used for writing if you pick Gemini as your writing model on the next "
+                 "step. Free to get, with usage limits on the free tier.",
         "link": {"label": "Get a key at aistudio.google.com/apikey", "url": "https://aistudio.google.com/apikey"},
         "fields": [
             {"key": "GEMINI_API_KEY", "label": "Gemini API key", "default": "", "secret": True, "required": True,
@@ -47,6 +52,25 @@ SETUP_STEPS = [
             {"key": "GEMINI_TEXT_MODEL", "label": "Text model", "default": "gemini-2.5-flash",
              "help": "Leave as default unless you know you want a different one."},
             {"key": "GEMINI_IMAGE_MODEL", "label": "Image model", "default": "gemini-2.5-flash-image",
+             "help": "Leave as default unless you know you want a different one."},
+        ],
+    },
+    {
+        "id": "writer",
+        "title": "Writing model",
+        "intro": "The research step that turns Search Console data into a topic backlog always uses "
+                 "Gemini. This step chooses which model actually WRITES the post - drafting, "
+                 "fact-checking, the humanize polish pass, and SEO metadata all follow this choice.",
+        "fields": [
+            {"key": "WRITER_PROVIDER", "label": "Write posts with", "type": "select", "default": "gemini",
+             "options": [
+                 {"value": "gemini", "label": "Gemini"},
+                 {"value": "claude", "label": "Claude"},
+             ],
+             "help": "You can switch this any time - it only affects future runs."},
+            {"key": "ANTHROPIC_API_KEY", "label": "Anthropic (Claude) API key", "default": "", "secret": True,
+             "help": "Only needed if you chose Claude above. Get one at console.anthropic.com."},
+            {"key": "ANTHROPIC_MODEL", "label": "Claude model", "default": "claude-sonnet-4-6",
              "help": "Leave as default unless you know you want a different one."},
         ],
     },
@@ -149,6 +173,9 @@ def needs_setup() -> bool:
     values = load_config()
     for key in REQUIRED_FIELDS:
         if not values.get(key) or "your_" in values.get(key, ""):
+            return True
+    if (values.get("WRITER_PROVIDER") or "gemini").strip().lower() == "claude":
+        if not values.get("ANTHROPIC_API_KEY"):
             return True
     return False
 

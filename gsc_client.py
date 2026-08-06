@@ -68,9 +68,16 @@ def list_properties(service_account_file: str) -> list:
 
 
 def get_performance_data(service_account_file: str, site_url: str,
-                          days: int = 90, dimensions=None, row_limit: int = 25000) -> list:
+                          days: int = 90, dimensions=None, row_limit: int = 25000,
+                          page_filter_contains: str = None) -> list:
     """Returns a flat list of dicts: [{query, page, clicks, impressions, ctr, position}, ...]
-    Paginates automatically (Google caps each response at row_limit rows)."""
+    Paginates automatically (Google caps each response at row_limit rows).
+
+    page_filter_contains: if given, only rows whose page URL CONTAINS this
+    substring are returned (e.g. "/blog/") - applied server-side via GSC's
+    own dimensionFilterGroups, so it doesn't just filter what we display, it
+    reduces what Google returns in the first place. Pass None/empty to get
+    every page on the property (old behavior)."""
     from datetime import date, timedelta
 
     dimensions = dimensions or ["query", "page"]
@@ -89,6 +96,14 @@ def get_performance_data(service_account_file: str, site_url: str,
             "rowLimit": row_limit,
             "startRow": start_row,
         }
+        if page_filter_contains:
+            body["dimensionFilterGroups"] = [{
+                "filters": [{
+                    "dimension": "page",
+                    "operator": "contains",
+                    "expression": page_filter_contains,
+                }]
+            }]
         resp = _execute_with_retry(service.searchanalytics().query(siteUrl=site_url, body=body))
         rows = resp.get("rows", [])
         if not rows:

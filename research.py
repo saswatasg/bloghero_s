@@ -6,14 +6,23 @@ gsc_client.py) into a prioritized topic backlog - same logic used in the
 manual Topical Content Map, now automated. $0 cost: everything here runs on
 your own GSC data only, no paid keyword-volume lookups.
 
+Scoped to blog content only: the property-wide GSC data includes every page
+on the site (product pages, category pages, etc.), but this tool only ever
+writes blog posts - so every pull is filtered to SITE_BLOG_PATH (default
+"/blog/") both server-side (GSC's own filter, cheaper) and again client-side
+as a safety net, so a stray non-blog URL can never sneak into the backlog.
+
 Produces two kinds of backlog items:
   1. REVIVAL   - existing pages with real impressions but poor CTR (fix, don't rewrite)
   2. GAP       - queries with decent impressions where you have no strong ranking
                  page at all (candidates for a brand-new post)
+  3. MANUAL    - added directly by a person through the dashboard, skipping
+                 GSC entirely (see add_manual_topic below)
 """
 
 import csv
 import os
+import re
 from datetime import datetime
 
 import pandas as pd
@@ -200,17 +209,52 @@ def update_backlog(revival_df: pd.DataFrame, gap_df: pd.DataFrame) -> int:
     return len(new_rows)
 
 
+def add_manual_topic(topic: str, category: str = "General", priority: str = "Medium",
+                      evidence: str = "Manually added from the dashboard") -> dict:
+    """Adds one topic straight to the backlog, bypassing GSC entirely - this
+    is what the dashboard's 'Add topic' button calls. Lets someone queue a
+    post for a topic they already know they want written, without waiting
+    on (or having) Search Console data for it."""
+    BACKLOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    existing = _load_existing_backlog()
+    if topic in {r["topic_or_page"] for r in existing}:
+        return {"ok": False, "error": "That topic is already in the backlog."}
+    row = {
+        "id": _next_id(existing), "type": "MANUAL", "topic_or_page": topic,
+        "category": category or "General", "priority": priority or "Medium",
+        "clicks": "", "impressions": "", "ctr": "", "position": "",
+        "evidence": evidence, "status": "queued",
+        "date_added": datetime.now().strftime("%Y-%m-%d"),
+    }
+    existing.append(row)
+    with open(BACKLOG_PATH, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=BACKLOG_FIELDS)
+        writer.writeheader()
+        writer.writerows(existing)
+    return {"ok": True, "row": row}
+
+
 def run_research(service_account_file: str, site_url: str, impression_threshold: int = 5000,
-                  gap_min_impressions: int = 500):
+                  gap_min_impressions: int = 500, blog_path: str = "/blog/"):
     import gsc_client
 
     print(f"Pulling GSC performance data for {site_url} via the official Search Console API...")
-    rows = gsc_client.get_performance_data(service_account_file, site_url, days=90, dimensions=["query", "page"])
+    if blog_path:
+        print(f"Scoping to blog content only: pages containing \"{blog_path}\"")
+    rows = gsc_client.get_performance_data(
+        service_account_file, site_url, days=90, dimensions=["query", "page"],
+        page_filter_contains=blog_path or None,
+    )
     df = _to_dataframe(rows)
+    if blog_path and not df.empty and "page" in df.columns:
+        # Safety net in addition to GSC's own server-side filter, in case a
+        # domain-property pull ever includes something unexpected.
+        df = df[df["page"].fillna("").str.contains(re.escape(blog_path), case=False)]
     if df.empty:
         print("No data returned - check that the service account was added as a")
         print("User on this exact property in Search Console (Settings > Users and permissions),")
-        print("and that GSC_SITE_URL in config.env matches the property exactly.")
+        print("that GSC_SITE_URL in config.env matches the property exactly, and that")
+        print(f"SITE_BLOG_PATH (\"{blog_path}\") actually matches your blog's URL structure.")
         return 0
 
     revival = compute_revival_candidates(df, impression_threshold)
@@ -229,4 +273,5 @@ if __name__ == "__main__":
         os.environ["GSHEETS_SERVICE_ACCOUNT_FILE"], os.environ["GSC_SITE_URL"],
         int(os.environ.get("REVIVAL_IMPRESSION_THRESHOLD", 5000)),
         int(os.environ.get("GAP_IMPRESSION_THRESHOLD", 500)),
+        os.environ.get("SITE_BLOG_PATH", "/blog/"),
     )

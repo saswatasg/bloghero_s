@@ -1,9 +1,10 @@
 # BlogHero
 
 A desktop dashboard for Sierra Living Concepts' content pipeline: pulls real
-Google Search Console data, finds revival/gap opportunities, drafts blog
-posts with Gemini, creates WordPress drafts, and logs everything to a
-Google Sheet - all through a proper app window, not a terminal.
+Google Search Console data (scoped to blog pages only), runs a detailed SEO
+research pass, drafts blog posts with Gemini or Claude, humanizes the prose,
+creates WordPress drafts, and logs everything to a Google Sheet - all
+through a proper app window, not a terminal.
 
 No coding experience needed to *use* the finished app - download the right
 installer, open it, and a setup wizard walks you through everything with
@@ -11,14 +12,56 @@ plain-English explanations and links to exactly where to go.
 
 ---
 
+## What's new in this update
+
+1. **Research is now scoped to blog pages only.** Previously it pulled GSC
+   data for every page on the site. Now it's filtered (both server-side via
+   GSC's own API filter, and again client-side as a safety net) to pages
+   containing `SITE_BLOG_PATH` (default `/blog/`, editable in Setup > Your
+   website). See `research.py` and `gsc_client.py`.
+2. **Export/Import credentials, so the app runs on any PC.** Dashboard →
+   "Export credentials" downloads a zip with `config.env` (all your API
+   keys) and the Google service account JSON. Share that zip alongside the
+   installer, and on the new machine: open the app, click "Import
+   credentials" on the setup screen, pick the zip - done, no retyping keys.
+   See the `/api/export-credentials` and `/api/import-credentials` routes
+   in `app.py`. The zip contains secrets in plain text - treat it like a
+   password, don't share it over public channels.
+3. **Clearer dashboard UI.** "Run Research" / "Run Write" are now "Find new
+   topics" (step 1) and "Write queued posts" (step 2), each with a plain-
+   English explanation of what it actually does directly underneath it.
+   There's also a new **"+ Add a topic manually"** button for queuing a
+   topic without waiting on Search Console data at all.
+4. **A detailed SEO research step, before drafting.** New `seo_research.py`
+   module: for each topic, before it's written, generates a proper research
+   brief (search intent, target keyword phrases, suggested subheadings,
+   real "people also ask" questions, competitive gap, internal-link ideas).
+   The draft prompt is built around this brief instead of just a topic
+   string. This step always uses Gemini.
+5. **Choice of writing model: Gemini or Claude.** New "Writing model" setup
+   step (`WRITER_PROVIDER` in config.env). Drafting, fact-checking, the
+   humanize pass, and SEO metadata generation all follow this choice.
+   Research (above) always stays on Gemini regardless of this setting.
+6. **A humanize pass before anything is finalized.** After fact-checking
+   the raw draft (so factual flags are based on the real claims, not
+   post-polish phrasing), a new pass smooths out AI-writing tells - robotic
+   transitions, repetitive sentence rhythm, generic hedging - while
+   explicitly preserving every `[VERIFY: ...]` marker, all headings, and
+   the word count. SEO metadata is then generated from this final text.
+
+---
+
 ## How this is built (architecture, for reference)
 
 - **`app.py`** - a FastAPI backend serving both a JSON API and the dashboard's
   static files (`static/index.html`, `style.css`, `app.js`).
-- **`research.py`, `content_writer.py`, `gsc_client.py`, `image_handler.py`,
-  `wordpress_publisher.py`, `sheets_logger.py`** - the actual pipeline logic
-  (unchanged from the earlier CLI version of this tool - same tested logic,
-  now called from API routes instead of command-line arguments).
+- **`research.py`, `seo_research.py`, `content_writer.py`, `gsc_client.py`,
+  `image_handler.py`, `wordpress_publisher.py`, `sheets_logger.py`** - the
+  pipeline logic. `research.py` decides WHICH topics are worth writing (from
+  GSC gap/CTR data, scoped to blog pages); `seo_research.py` does detailed
+  per-topic research (always Gemini) BEFORE drafting; `content_writer.py`
+  drafts/fact-checks/humanizes/generates metadata (Gemini or Claude, per
+  `WRITER_PROVIDER`).
 - **`runner.py`** - wires the pipeline modules together for one research/write
   run.
 - **`run_pipeline.py`** - a small standalone script that runs one pipeline
