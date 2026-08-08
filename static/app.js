@@ -589,10 +589,15 @@ function renderKeywordResults(ideas) {
     const realBadge = real
       ? `<span class="badge badge-real">real data: ${real.impressions} impr, pos ${real.position ?? "?"}${real.has_blog_page ? "" : " \u2014 no blog page yet"}</span>`
       : `<span class="badge badge-idea">idea, no search history yet</span>`;
+    const trend = idea.trend;
+    const trendIcon = trend ? (trend.direction === "rising" ? "\u2191" : trend.direction === "declining" ? "\u2193" : "\u2192") : "";
+    const trendBadge = trend
+      ? `<span class="badge badge-trend badge-trend-${trend.direction}">${trendIcon} trend: ${trend.direction} (${trend.score}/100)</span>`
+      : "";
     row.innerHTML = `
       <div class="keyword-row-main">
         <div class="keyword-phrase">${idea.keyword}</div>
-        <div class="keyword-meta"><span class="badge badge-intent">${idea.intent}</span> ${realBadge}</div>
+        <div class="keyword-meta"><span class="badge badge-intent">${idea.intent}</span> ${realBadge} ${trendBadge}</div>
         ${idea.why ? `<div class="keyword-why">${idea.why}</div>` : ""}
       </div>
       <button class="btn btn-ghost btn-small keyword-add-btn">+ Add to backlog</button>

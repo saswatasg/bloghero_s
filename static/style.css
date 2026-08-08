@@ -226,6 +226,9 @@ body {
 .badge-intent { background: var(--light-blue); color: var(--navy); }
 .badge-real { background: #DFF3E3; color: #1E6B34; }
 .badge-idea { background: #F0EEE8; color: var(--muted); }
+.badge-trend-rising { background: #DFF3E3; color: #1E6B34; }
+.badge-trend-declining { background: #FBE3E0; color: var(--red); }
+.badge-trend-steady { background: #F0EEE8; color: var(--muted); }
 
 #log-pane {
   background: #10182A;

@@ -12,7 +12,48 @@ plain-English explanations and links to exactly where to go.
 
 ---
 
-## What's new in this update
+## What's new in this update (v1.5)
+
+Keyword research now pulls from two additional free, zero-setup sources
+alongside the AI-generated ideas and your own GSC history:
+
+- **Google Autocomplete** - the actual suggestions Google shows as you
+  type. Real phrasing, no API key, no account.
+- **Google Trends** - relative search interest over the last 12 months and
+  a rising/steady/declining direction per keyword (0-100 scale, NOT an
+  absolute volume number - see "Adding real search volume" below for why).
+
+Both degrade gracefully: if either is unavailable (rate-limited, network
+issue), keyword research still returns everything else and simply omits
+that badge. See `free_keyword_tools.py`.
+
+### Adding real search volume (Google Keyword Planner) - a later upgrade
+
+Neither Autocomplete nor Trends gives you an actual "12,000 searches/month"
+number the way Semrush or Ahrefs do - Google doesn't expose that for free
+anywhere except Keyword Planner, and Keyword Planner requires real setup:
+
+1. A Google Ads account (free to create, no ad spend required to use the
+   Keyword Planner tool itself).
+2. A developer token from Google - apply inside the Ads account under
+   Tools > API Center. Basic access is free but Google reviews the
+   application; this can take a few days.
+3. An OAuth2 client (Google Cloud Console) so the app can call the API on
+   your behalf, plus the `google-ads` Python package.
+4. Note: without meaningful ad-spend history on the account, Google often
+   returns volume as a bucketed range (e.g. "1K-10K") rather than an exact
+   number - full precision typically needs some active campaign history.
+
+This wasn't wired into BlogHero because the approval/setup time doesn't fit
+a same-session build, and half-building an integration behind a wall you
+can't test isn't better than clearly documenting the path. If this is
+worth the setup effort later, the natural place for it is a new
+`keyword_planner.py` module following the same pattern as
+`free_keyword_tools.py` - a `get_search_volume(keywords: list) -> dict`
+function that `runner.run_keyword_research` merges in exactly like the
+GSC/Autocomplete/Trends sources are merged in now.
+
+## What's new in v1.3-1.4 (previous updates)
 
 1. **Research is now scoped to blog pages only.** Previously it pulled GSC
    data for every page on the site. Now it's filtered (both server-side via

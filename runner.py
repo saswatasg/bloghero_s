@@ -71,15 +71,27 @@ def run_research(cfg: dict):
 
 
 def run_keyword_research(cfg: dict, seed: str) -> list:
-    """Powers the dashboard's on-demand 'Keyword research' panel. Generates
-    AI keyword ideas, then enriches any that already have real GSC history
-    with actual impressions/clicks/position - see seo_research.research_keywords
-    and research.find_query_data for what each half does and why they're kept
-    separate (AI ideas are never allowed to invent a fake number)."""
+    """Powers the dashboard's on-demand 'Keyword research' panel. Combines
+    three sources, each doing a different honest job:
+
+      1. seo_research.research_keywords()  - AI-generated ideas (Gemini)
+      2. research.find_query_data()        - your OWN real GSC history,
+                                              wherever it exists
+      3. free_keyword_tools                - Google Autocomplete (real
+                                              phrases Google itself
+                                              suggests) + Google Trends
+                                              (relative interest/direction,
+                                              NOT absolute volume)
+
+    None of these ever fabricates a search-volume number - see
+    free_keyword_tools.py's docstring for why that's a deliberate line and
+    what a paid/registered upgrade path (Google Keyword Planner) would add."""
     ideas = seo_research.research_keywords(
         gemini_api_key=cfg["GEMINI_API_KEY"], gemini_model=cfg.get("GEMINI_TEXT_MODEL", "gemini-2.5-flash"),
         seed=seed,
     )
+
+    # --- Your own real GSC history, if configured ---
     real_data = []
     if cfg.get("GSHEETS_SERVICE_ACCOUNT_FILE") and cfg.get("GSC_SITE_URL"):
         real_data = research.find_query_data(
@@ -95,6 +107,30 @@ def run_keyword_research(cfg: dict, seed: str) -> list:
     for r in real_data:
         if research._normalize_query(r["query"]) not in suggested_sigs:
             ideas.append({"keyword": r["query"], "intent": "from your search data", "why": "", "real_data": r})
+            suggested_sigs.add(research._normalize_query(r["query"]))
+
+    # --- Google Autocomplete: real phrases Google itself suggests ---
+    import free_keyword_tools
+
+    print("  Checking Google Autocomplete for real phrasing...")
+    autocomplete = free_keyword_tools.get_autocomplete_suggestions(seed)
+    for phrase in autocomplete:
+        sig = research._normalize_query(phrase)
+        if sig not in suggested_sigs:
+            ideas.append({"keyword": phrase, "intent": "from Google Autocomplete", "why": "", "real_data": None})
+            suggested_sigs.add(sig)
+
+    # --- Google Trends: relative interest + direction, top phrases only ---
+    # Capped at 5 (Trends' own per-request limit) - the seed plus the
+    # highest-value ideas (real GSC data first, since those are already
+    # proven demand; AI ideas fill any remaining slots).
+    print("  Checking Google Trends for interest direction...")
+    priority_order = sorted(ideas, key=lambda i: 0 if i.get("real_data") else 1)
+    trend_targets = [seed] + [i["keyword"] for i in priority_order if i["keyword"].lower() != seed.lower()]
+    trends = free_keyword_tools.get_trends_interest(trend_targets, max_keywords=5)
+    for idea in ideas:
+        idea["trend"] = trends.get(idea["keyword"])  # None if not in the capped batch or no signal
+
     return ideas
 
 
