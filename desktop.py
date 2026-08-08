@@ -18,6 +18,17 @@ check:
   2. Run `python app.py` directly instead, then open the printed URL in a
      regular browser - this isolates whether the problem is the FastAPI
      backend or the pywebview wrapper specifically.
+
+Credentials export/import bridge - why this exists:
+pywebview's window is a native OS webview, NOT a full browser. It has no
+download manager, so navigating to a URL that returns a file attachment
+(what the "Export credentials" button used to do via window.location.href)
+silently does nothing inside the packaged app, even though it works fine
+when the same page is opened in a real browser during development - which
+is exactly why this bug wasn't caught by dev-mode testing. The fix is to
+give the page a genuine bridge into Python (`js_api`) that opens a native
+Save/Open file dialog and writes bytes directly to whatever path the user
+picks - no HTTP round-trip, no browser download behavior required at all.
 """
 
 import multiprocessing
@@ -55,6 +66,48 @@ def _wait_for_server(port: int, timeout: float = 10.0) -> bool:
     return False
 
 
+class Api:
+    """Exposed to the page as `window.pywebview.api.*` - see static/app.js,
+    which calls these instead of a browser-style download/upload whenever
+    it detects it's running inside the packaged app (window.pywebview is
+    only present there, never when app.py is opened directly in a browser
+    during development - app.js falls back to the old HTTP-based flow in
+    that case, so both dev and packaged modes keep working)."""
+
+    def export_credentials(self):
+        try:
+            data = app_module.build_credentials_zip_bytes()
+        except FileNotFoundError as e:
+            return {"ok": False, "error": str(e)}
+        window = webview.windows[0]
+        result = window.create_file_dialog(
+            webview.SAVE_DIALOG, directory="", save_filename="bloghero_credentials.zip",
+        )
+        # create_file_dialog returns None (cancelled) or a tuple/str depending
+        # on platform/pywebview version - normalize both.
+        if not result:
+            return {"ok": False, "error": "cancelled"}
+        target_path = result[0] if isinstance(result, (list, tuple)) else result
+        with open(target_path, "wb") as f:
+            f.write(data)
+        return {"ok": True, "path": target_path}
+
+    def import_credentials(self):
+        window = webview.windows[0]
+        result = window.create_file_dialog(
+            webview.OPEN_DIALOG, allow_multiple=False, file_types=("Zip files (*.zip)", "All files (*.*)"),
+        )
+        if not result:
+            return {"ok": False, "error": "cancelled"}
+        source_path = result[0] if isinstance(result, (list, tuple)) else result
+        try:
+            with open(source_path, "rb") as f:
+                data = f.read()
+            return app_module.restore_credentials_from_zip_bytes(data)
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+
 def main():
     port = _find_free_port()
     print(f"Starting BlogHero on {platform.system()} (port {port})...")
@@ -66,9 +119,11 @@ def main():
         print("Server didn't respond in time - something may have failed to start.")
 
     url = f"http://127.0.0.1:{port}"
+    api = Api()
     window = webview.create_window(
         "BlogHero", url,
         width=1320, height=880, min_size=(960, 640),
+        js_api=api,
     )
     # gui=None lets pywebview auto-pick the right native backend per OS
     # (EdgeChromium on Windows, Cocoa/WebKit on Mac) - no manual OS branching needed.

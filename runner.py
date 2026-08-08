@@ -18,6 +18,7 @@ Write pipeline per GAP/MANUAL topic, in order:
 """
 
 import csv
+import time
 
 import content_writer
 import gsc_client
@@ -56,7 +57,9 @@ def _mark_status(topic_id: str, new_status: str):
 
 
 def run_research(cfg: dict):
-    print(">>> Step 1: Research - pulling GSC data (blog pages only) and updating the backlog...")
+    print(">>> Step 1: Research - pulling GSC data and updating the backlog...")
+    print("    (REVIVAL uses blog pages only; GAP uses the whole site, so a query already")
+    print("     covered by any well-ranking page - blog or not - is correctly excluded.)")
     added = research.run_research(
         cfg["GSHEETS_SERVICE_ACCOUNT_FILE"], cfg["GSC_SITE_URL"],
         int(cfg.get("REVIVAL_IMPRESSION_THRESHOLD", 5000)),
@@ -65,6 +68,34 @@ def run_research(cfg: dict):
     )
     print(f">>> Research complete. {added} new topic(s) added to the backlog.")
     return added
+
+
+def run_keyword_research(cfg: dict, seed: str) -> list:
+    """Powers the dashboard's on-demand 'Keyword research' panel. Generates
+    AI keyword ideas, then enriches any that already have real GSC history
+    with actual impressions/clicks/position - see seo_research.research_keywords
+    and research.find_query_data for what each half does and why they're kept
+    separate (AI ideas are never allowed to invent a fake number)."""
+    ideas = seo_research.research_keywords(
+        gemini_api_key=cfg["GEMINI_API_KEY"], gemini_model=cfg.get("GEMINI_TEXT_MODEL", "gemini-2.5-flash"),
+        seed=seed,
+    )
+    real_data = []
+    if cfg.get("GSHEETS_SERVICE_ACCOUNT_FILE") and cfg.get("GSC_SITE_URL"):
+        real_data = research.find_query_data(
+            cfg["GSHEETS_SERVICE_ACCOUNT_FILE"], cfg["GSC_SITE_URL"], seed, cfg.get("SITE_BLOG_PATH", "/blog/"),
+        )
+    real_by_signature = {research._normalize_query(r["query"]): r for r in real_data}
+    for idea in ideas:
+        match = real_by_signature.get(research._normalize_query(idea["keyword"]))
+        idea["real_data"] = match  # None if no GSC history exists for this idea yet
+    # Also surface any real query the model didn't happen to suggest -
+    # actual search history is worth showing even if the AI missed it.
+    suggested_sigs = {research._normalize_query(i["keyword"]) for i in ideas}
+    for r in real_data:
+        if research._normalize_query(r["query"]) not in suggested_sigs:
+            ideas.append({"keyword": r["query"], "intent": "from your search data", "why": "", "real_data": r})
+    return ideas
 
 
 def _handle_gap(cfg, t):
@@ -167,7 +198,13 @@ def _log_to_sheet(cfg, t, edit_link, image_source, flag_count, word_count):
             print(f"Sheet logging failed: {e}")
 
 
-def run_write(cfg: dict):
+def run_write(cfg: dict, pause_event=None, stop_event=None):
+    """pause_event / stop_event are optional multiprocessing.Event-likes
+    (see pipeline_worker.py). Checked BETWEEN topics only - there's no
+    clean way to pause mid-API-call, and topic boundaries are a natural,
+    always-safe point to stop: nothing is left half-written, the current
+    topic's status is set correctly either way, and everything after it
+    simply stays 'queued' for next time."""
     DRAFTS_DIR.mkdir(parents=True, exist_ok=True)
     max_topics = int(cfg.get("MAX_TOPICS_PER_RUN", 2))
     topics = _load_queued_topics(max_topics)
@@ -178,6 +215,18 @@ def run_write(cfg: dict):
     print(f">>> Step 2: Write - drafting {len(topics)} topic(s)...")
     print("    Each GAP/MANUAL topic runs: SEO research \u2192 draft \u2192 fact-check \u2192 humanize \u2192 SEO metadata.")
     for t in topics:
+        if stop_event is not None and stop_event.is_set():
+            print("\n>>> Stopped. Remaining queued topics were left untouched.")
+            return
+        if pause_event is not None and pause_event.is_set():
+            print("\n>>> Paused - waiting to resume (remaining topics stay queued until then)...")
+            while pause_event.is_set():
+                if stop_event is not None and stop_event.is_set():
+                    print(">>> Stopped while paused. Remaining queued topics were left untouched.")
+                    return
+                time.sleep(1)
+            print(">>> Resumed.")
+
         print(f"\n--- {t['type']}: {t['topic_or_page']} ({t['category']}, {t['priority']}) ---")
         try:
             if t["type"] == "REVIVAL":

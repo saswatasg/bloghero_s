@@ -57,9 +57,10 @@
           <div class="run-step-body">
             <button class="btn btn-primary btn-wide" id="btn-research">Find new topics</button>
             <div class="run-step-help">
-              Pulls your last 90 days of Search Console data (blog pages only) and adds two kinds of
-              topic to the backlog below: pages getting clicks but no impressions boost (<b>REVIVAL</b>),
-              and real searches with no strong page yet (<b>GAP</b>). Doesn't write anything - just fills the queue.
+              Pulls your last 90 days of Search Console data and adds two kinds of topic to the
+              backlog below: existing blog pages getting impressions but a poor click rate
+              (<b>REVIVAL</b>), and real searches with decent demand where nothing on the whole
+              site ranks well yet (<b>GAP</b>). Doesn't write anything - just fills the queue.
             </div>
           </div>
         </div>
@@ -78,8 +79,16 @@
 
         <button class="btn btn-gold btn-wide" id="btn-run-all">Run both, in order</button>
 
+        <div class="run-controls hidden" id="run-controls">
+          <button class="btn btn-ghost btn-small" id="btn-pause-run">⏸ Pause</button>
+          <button class="btn btn-ghost btn-small hidden" id="btn-resume-run">▶ Resume</button>
+          <button class="btn btn-ghost btn-small btn-danger-ghost" id="btn-stop-run">■ Stop</button>
+          <div class="field-help">Pause/stop apply to Write, between topics - the topic in progress always finishes first.</div>
+        </div>
+
         <div class="panel-actions-footer">
           <button class="btn btn-ghost btn-small" id="btn-add-topic">+ Add a topic manually</button>
+          <button class="btn btn-ghost btn-small" id="btn-keyword-research">Keyword research</button>
           <button class="btn btn-ghost btn-small" id="btn-export-creds">Export credentials</button>
           <button class="btn btn-ghost btn-small" id="btn-open-setup">Edit setup</button>
         </div>
@@ -144,6 +153,25 @@
       </div>
       <button class="btn btn-primary btn-wide" id="add-topic-submit">Add to backlog</button>
       <div class="field-help" id="add-topic-error"></div>
+    </div>
+  </div>
+
+  <!-- Keyword research modal -->
+  <div id="keyword-research-modal" class="modal hidden">
+    <div class="modal-content modal-content-medium">
+      <button class="modal-close" id="keyword-research-close">&times;</button>
+      <h3>Keyword research</h3>
+      <p class="wizard-intro">Type a seed topic to get related search phrases people actually use. Ideas
+        with real Search Console history behind them are labeled - everything else is an AI-generated
+        idea worth writing about, not a guaranteed number. Always uses Gemini, same as the automatic
+        research step.</p>
+      <div class="field">
+        <label>Seed topic or keyword *</label>
+        <input type="text" id="keyword-seed-input" placeholder="e.g. dining table sizing">
+      </div>
+      <button class="btn btn-primary btn-wide" id="keyword-research-submit">Research</button>
+      <div class="field-help" id="keyword-research-error"></div>
+      <div id="keyword-results" class="keyword-results"></div>
     </div>
   </div>
 

@@ -336,8 +336,23 @@ function connectLogSocket() {
 async function refreshRunStatus() {
   const s = await api("/api/run-status");
   const running = s.running;
+  const paused = s.paused;
   ["btn-research", "btn-write", "btn-run-all"].forEach((id) => ($(`#${id}`).disabled = running));
-  $("#topbar-status").textContent = running ? `Running: ${s.action}...` : "Ready";
+  const controls = $("#run-controls");
+  if (controls) controls.classList.toggle("hidden", !running);
+  const pauseBtn = $("#btn-pause-run");
+  const resumeBtn = $("#btn-resume-run");
+  if (pauseBtn && resumeBtn) {
+    pauseBtn.classList.toggle("hidden", !running || paused);
+    resumeBtn.classList.toggle("hidden", !running || !paused);
+  }
+  if (!running) {
+    $("#topbar-status").textContent = "Ready";
+  } else if (paused) {
+    $("#topbar-status").textContent = `Paused (${s.action})`;
+  } else {
+    $("#topbar-status").textContent = `Running: ${s.action}...`;
+  }
 }
 
 async function triggerRun(action) {
@@ -353,6 +368,25 @@ async function triggerRun(action) {
 $("#btn-research").addEventListener("click", () => triggerRun("research"));
 $("#btn-write").addEventListener("click", () => triggerRun("write"));
 $("#btn-run-all").addEventListener("click", () => triggerRun("run-all"));
+
+const pauseBtn = $("#btn-pause-run");
+if (pauseBtn) pauseBtn.addEventListener("click", async () => {
+  try { await api("/api/run/pause", { method: "POST" }); refreshRunStatus(); } catch (err) { alert(err.message); }
+});
+const resumeBtn = $("#btn-resume-run");
+if (resumeBtn) resumeBtn.addEventListener("click", async () => {
+  try { await api("/api/run/resume", { method: "POST" }); refreshRunStatus(); } catch (err) { alert(err.message); }
+});
+const stopBtn = $("#btn-stop-run");
+if (stopBtn) stopBtn.addEventListener("click", async () => {
+  if (!confirm("Stop the current run? Whatever topic is mid-write will finish; everything after it stays queued.")) return;
+  try { await api("/api/run/stop", { method: "POST" }); refreshRunStatus(); } catch (err) { alert(err.message); }
+});
+
+// Poll run status every few seconds too (in addition to WebSocket log
+// completion events) so pause/resume state and a run started from another
+// tab/window stay in sync even without a fresh log line arriving.
+setInterval(() => { if (!$("#dashboard-screen").classList.contains("hidden")) refreshRunStatus(); }, 4000);
 
 // ---------------------------------------------------------------------
 // Backlog table
@@ -412,7 +446,17 @@ $("#draft-modal").addEventListener("click", (e) => {
 
 // ---------------------------------------------------------------------
 // Credentials export/import - "run BlogHero on any PC"
+//
+// The packaged app runs inside a pywebview window, which has no browser
+// download manager - window.location.href to a file-attachment response
+// (the old approach) silently does nothing there, even though it works
+// fine in a normal browser during dev. window.pywebview is only present
+// inside the packaged app, so it's what tells us which path to use.
+// See desktop.py's Api class for the native save/open dialog side of this.
 // ---------------------------------------------------------------------
+let pywebviewReady = !!window.pywebview;
+window.addEventListener("pywebviewready", () => { pywebviewReady = true; });
+
 const importInput = $("#import-credentials-input");
 if (importInput) {
   importInput.addEventListener("change", async () => {
@@ -423,17 +467,7 @@ if (importInput) {
     formData.append("file", importInput.files[0]);
     try {
       const result = await api("/api/import-credentials", { method: "POST", body: formData });
-      status.textContent = "Imported. Loading...";
-      if (!result.needs_setup) {
-        showDashboard();
-      } else {
-        status.textContent = "Imported, but a few required fields are still missing - check the wizard below.";
-        state.schema = await api("/api/setup-schema");
-        const st = await api("/api/status");
-        state.values = st.config || {};
-        state.stepIndex = 0;
-        renderWizardStep();
-      }
+      await afterImport(result, status);
     } catch (err) {
       status.textContent = "Import failed: " + err.message;
     }
@@ -441,10 +475,146 @@ if (importInput) {
   });
 }
 
+async function afterImport(result, status) {
+  status.textContent = "Imported. Loading...";
+  if (!result.needs_setup) {
+    showDashboard();
+  } else {
+    status.textContent = "Imported, but a few required fields are still missing - check the wizard below.";
+    state.schema = await api("/api/setup-schema");
+    const st = await api("/api/status");
+    state.values = st.config || {};
+    state.stepIndex = 0;
+    renderWizardStep();
+  }
+}
+
+const importBanner = $("#import-credentials-input")?.closest(".import-banner-btn");
+if (importBanner) {
+  importBanner.addEventListener("click", async (e) => {
+    if (!(pywebviewReady || window.pywebview)) return; // let the native <input type=file> handle it
+    e.preventDefault();
+    const status = $("#import-credentials-status");
+    status.textContent = "Choose a file...";
+    try {
+      const result = await window.pywebview.api.import_credentials();
+      if (result && result.error === "cancelled") { status.textContent = ""; return; }
+      if (result && result.ok === false) { status.textContent = "Import failed: " + result.error; return; }
+      await afterImport(result, status);
+    } catch (err) {
+      status.textContent = "Import failed: " + err.message;
+    }
+  });
+}
+
 const exportBtn = $("#btn-export-creds");
 if (exportBtn) {
-  exportBtn.addEventListener("click", () => {
-    window.location.href = "/api/export-credentials";
+  exportBtn.addEventListener("click", async () => {
+    if (pywebviewReady || window.pywebview) {
+      exportBtn.disabled = true;
+      const original = exportBtn.textContent;
+      exportBtn.textContent = "Choose where to save...";
+      try {
+        const result = await window.pywebview.api.export_credentials();
+        if (result && result.error === "cancelled") {
+          // user closed the save dialog - not an error
+        } else if (result && result.ok === false) {
+          alert("Export failed: " + result.error);
+        }
+      } catch (err) {
+        alert("Export failed: " + err.message);
+      }
+      exportBtn.textContent = original;
+      exportBtn.disabled = false;
+    } else {
+      // Dev-mode fallback: running app.py directly in a real browser, which
+      // does have a normal download manager - this still works fine there.
+      window.location.href = "/api/export-credentials";
+    }
+  });
+}
+
+// ---------------------------------------------------------------------
+// Keyword research (on-demand, separate from the automatic per-topic step)
+// ---------------------------------------------------------------------
+const keywordBtn = $("#btn-keyword-research");
+if (keywordBtn) {
+  keywordBtn.addEventListener("click", () => {
+    $("#keyword-seed-input").value = "";
+    $("#keyword-results").innerHTML = "";
+    $("#keyword-research-error").textContent = "";
+    $("#keyword-research-modal").classList.remove("hidden");
+    $("#keyword-seed-input").focus();
+  });
+}
+$("#keyword-research-close").addEventListener("click", () => $("#keyword-research-modal").classList.add("hidden"));
+$("#keyword-research-modal").addEventListener("click", (e) => {
+  if (e.target.id === "keyword-research-modal") $("#keyword-research-modal").classList.add("hidden");
+});
+$("#keyword-research-submit").addEventListener("click", async () => {
+  const seed = $("#keyword-seed-input").value.trim();
+  const errBox = $("#keyword-research-error");
+  const resultsBox = $("#keyword-results");
+  errBox.textContent = "";
+  resultsBox.innerHTML = "";
+  if (!seed) { errBox.textContent = "Enter a seed topic or keyword first."; return; }
+  const submitBtn = $("#keyword-research-submit");
+  submitBtn.disabled = true;
+  submitBtn.textContent = "Researching...";
+  try {
+    const result = await api("/api/keyword-research", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ seed }),
+    });
+    renderKeywordResults(result.ideas || []);
+  } catch (err) {
+    errBox.textContent = err.message;
+  }
+  submitBtn.disabled = false;
+  submitBtn.textContent = "Research";
+});
+
+function renderKeywordResults(ideas) {
+  const box = $("#keyword-results");
+  box.innerHTML = "";
+  if (ideas.length === 0) {
+    box.innerHTML = '<p class="muted">No ideas came back - try a broader seed term.</p>';
+    return;
+  }
+  ideas.forEach((idea) => {
+    const row = document.createElement("div");
+    row.className = "keyword-row";
+    const real = idea.real_data;
+    const realBadge = real
+      ? `<span class="badge badge-real">real data: ${real.impressions} impr, pos ${real.position ?? "?"}${real.has_blog_page ? "" : " \u2014 no blog page yet"}</span>`
+      : `<span class="badge badge-idea">idea, no search history yet</span>`;
+    row.innerHTML = `
+      <div class="keyword-row-main">
+        <div class="keyword-phrase">${idea.keyword}</div>
+        <div class="keyword-meta"><span class="badge badge-intent">${idea.intent}</span> ${realBadge}</div>
+        ${idea.why ? `<div class="keyword-why">${idea.why}</div>` : ""}
+      </div>
+      <button class="btn btn-ghost btn-small keyword-add-btn">+ Add to backlog</button>
+    `;
+    row.querySelector(".keyword-add-btn").addEventListener("click", async (e) => {
+      const btn = e.target;
+      btn.disabled = true;
+      btn.textContent = "Adding...";
+      try {
+        await api("/api/backlog", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ topic: idea.keyword, category: "General", priority: "Medium" }),
+        });
+        btn.textContent = "Added";
+        refreshBacklog();
+      } catch (err) {
+        btn.textContent = "Failed";
+        btn.title = err.message;
+      }
+    });
+    box.appendChild(row);
   });
 }
 

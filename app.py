@@ -31,6 +31,7 @@ import paths
 import pipeline_worker
 import research
 import runner
+import seo_research
 
 app = FastAPI(title="BlogHero")
 
@@ -38,9 +39,59 @@ BACKLOG_PATH = paths.BACKLOG_PATH
 DRAFTS_DIR = paths.DRAFTS_DIR
 STATIC_DIR = paths.STATIC_DIR
 
-RUN_STATE = {"running": False, "action": None}
+RUN_STATE = {"running": False, "action": None, "paused": False}
+# The multiprocessing.Manager (and the pause/stop Events it hands out) live
+# for the lifetime of the currently-running job only - see start_run below.
+_current_manager = None
+_pause_event = None
+_stop_event = None
 _ws_clients: list[WebSocket] = []
 _main_loop: asyncio.AbstractEventLoop | None = None
+
+
+def build_credentials_zip_bytes() -> bytes:
+    """Shared by the FastAPI /api/export-credentials route (used when
+    running as a plain webpage, e.g. `python app.py` opened in a browser)
+    AND by desktop.py's native pywebview save-file bridge (used by the
+    actual packaged app - see desktop.py for why window.location.href-style
+    downloads don't work inside a pywebview window). Keeping the zip-building
+    logic in exactly one place means both call paths can never drift apart."""
+    if not paths.CONFIG_PATH.exists():
+        raise FileNotFoundError("Nothing to export yet - finish setup first.")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.write(paths.CONFIG_PATH, arcname="config.env")
+        if paths.SERVICE_ACCOUNT_PATH.exists():
+            zf.write(paths.SERVICE_ACCOUNT_PATH, arcname="gsheets_service_account.json")
+        readme = (
+            "BlogHero credentials bundle\n"
+            "----------------------------\n"
+            "Contains config.env and (if present) the Google service account key.\n"
+            "This includes API keys and other secrets in plain text.\n\n"
+            "To use on another PC: install BlogHero, open it once (it'll show the setup\n"
+            "wizard), then instead of filling the wizard, click Import credentials\n"
+            "and pick this zip file. Everything will be filled in automatically.\n"
+        )
+        zf.writestr("README.txt", readme)
+    return buf.getvalue()
+
+
+def restore_credentials_from_zip_bytes(data: bytes) -> dict:
+    """The import-side counterpart to build_credentials_zip_bytes - same
+    shared-function pattern, same reason (FastAPI route + desktop.py native
+    open-file bridge both call this)."""
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        names = zf.namelist()
+        if "config.env" not in names:
+            raise ValueError("That zip doesn't contain a config.env - is this a BlogHero credentials bundle?")
+        paths.DATA_DIR.mkdir(parents=True, exist_ok=True)
+        with zf.open("config.env") as src, open(paths.CONFIG_PATH, "wb") as dst:
+            shutil.copyfileobj(src, dst)
+        if "gsheets_service_account.json" in names:
+            paths.SERVICE_ACCOUNT_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open("gsheets_service_account.json") as src, open(paths.SERVICE_ACCOUNT_PATH, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+    return {"ok": True, "needs_setup": config_store.needs_setup()}
 
 
 @app.on_event("startup")
@@ -156,27 +207,12 @@ async def gsc_properties():
 
 @app.get("/api/export-credentials")
 async def export_credentials():
-    if not paths.CONFIG_PATH.exists():
-        return JSONResponse({"error": "Nothing to export yet - finish setup first."}, status_code=400)
-
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.write(paths.CONFIG_PATH, arcname="config.env")
-        if paths.SERVICE_ACCOUNT_PATH.exists():
-            zf.write(paths.SERVICE_ACCOUNT_PATH, arcname="gsheets_service_account.json")
-        readme = (
-            "BlogHero credentials bundle\n"
-            "----------------------------\n"
-            "Contains config.env and (if present) the Google service account key.\n"
-            "This includes API keys and other secrets in plain text.\n\n"
-            "To use on another PC: install BlogHero, open it once (it'll show the setup\n"
-            "wizard), then instead of filling the wizard, go to Setup > Import credentials\n"
-            "and pick this zip file. Everything will be filled in automatically.\n"
-        )
-        zf.writestr("README.txt", readme)
-    buf.seek(0)
+    try:
+        data = build_credentials_zip_bytes()
+    except FileNotFoundError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
     return StreamingResponse(
-        buf, media_type="application/zip",
+        io.BytesIO(data), media_type="application/zip",
         headers={"Content-Disposition": "attachment; filename=bloghero_credentials.zip"},
     )
 
@@ -185,20 +221,12 @@ async def export_credentials():
 async def import_credentials(file: UploadFile = File(...)):
     try:
         contents = await file.read()
-        with zipfile.ZipFile(io.BytesIO(contents)) as zf:
-            names = zf.namelist()
-            if "config.env" not in names:
-                return JSONResponse({"error": "That zip doesn't contain a config.env - is this a BlogHero credentials bundle?"}, status_code=400)
-            paths.DATA_DIR.mkdir(parents=True, exist_ok=True)
-            with zf.open("config.env") as src, open(paths.CONFIG_PATH, "wb") as dst:
-                shutil.copyfileobj(src, dst)
-            if "gsheets_service_account.json" in names:
-                paths.SERVICE_ACCOUNT_PATH.parent.mkdir(parents=True, exist_ok=True)
-                with zf.open("gsheets_service_account.json") as src, open(paths.SERVICE_ACCOUNT_PATH, "wb") as dst:
-                    shutil.copyfileobj(src, dst)
-        return {"ok": True, "needs_setup": config_store.needs_setup()}
+        result = restore_credentials_from_zip_bytes(contents)
+        return result
     except zipfile.BadZipFile:
         return JSONResponse({"error": "That file isn't a valid zip."}, status_code=400)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=400)
 
@@ -263,13 +291,41 @@ async def draft_content(filename: str):
 
 
 # ---------------------------------------------------------------------------
+# Keyword research (on-demand, separate from the automatic per-topic brief)
+# ---------------------------------------------------------------------------
+
+@app.post("/api/keyword-research")
+async def keyword_research(payload: dict):
+    seed = (payload.get("seed") or "").strip()
+    if not seed:
+        return JSONResponse({"error": "Enter a seed topic or keyword first."}, status_code=400)
+    cfg = config_store.load_config()
+    if not cfg.get("GEMINI_API_KEY"):
+        return JSONResponse({"error": "Gemini isn't configured yet - keyword research always uses Gemini, same as research."}, status_code=400)
+    try:
+        ideas = await run_in_threadpool(runner.run_keyword_research, cfg, seed)
+        return {"seed": seed, "ideas": ideas}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+# ---------------------------------------------------------------------------
 # Running the pipeline
 # ---------------------------------------------------------------------------
 
 async def _run_pipeline_process(action: str):
+    global _current_manager, _pause_event, _stop_event
     manager = multiprocessing.Manager()
     queue = manager.Queue()
-    process = multiprocessing.Process(target=pipeline_worker.worker_entry, args=(action, queue))
+    pause_event = manager.Event()
+    stop_event = manager.Event()
+    _current_manager = manager
+    _pause_event = pause_event
+    _stop_event = stop_event
+
+    process = multiprocessing.Process(
+        target=pipeline_worker.worker_entry, args=(action, queue, pause_event, stop_event),
+    )
     process.start()
 
     def _drain_queue():
@@ -286,12 +342,52 @@ async def _run_pipeline_process(action: str):
     await run_in_threadpool(process.join)
     RUN_STATE["running"] = False
     RUN_STATE["action"] = None
+    RUN_STATE["paused"] = False
+    _current_manager = None
+    _pause_event = None
+    _stop_event = None
 
 
 async def _broadcast(text: str):
     print(text, end="")
     for ws in list(_ws_clients):
         await _safe_send(ws, text)
+
+
+# IMPORTANT: these three specific routes MUST be registered before
+# /api/run/{action} below. FastAPI/Starlette matches routes in registration
+# order, so a wildcard path parameter registered first will swallow
+# "/api/run/pause" etc. before they ever reach their own handlers - this was
+# a real bug here (pause/resume/stop all silently fell into start_run's
+# "Unknown action" branch instead of their own logic).
+@app.post("/api/run/pause")
+async def pause_run():
+    """Only meaningful for a 'write' (or 'run-all') run - see runner.run_write,
+    which is the only loop that actually checks this, between topics."""
+    if not RUN_STATE["running"] or _pause_event is None:
+        return JSONResponse({"error": "Nothing is running"}, status_code=409)
+    _pause_event.set()
+    RUN_STATE["paused"] = True
+    return {"ok": True, "paused": True}
+
+
+@app.post("/api/run/resume")
+async def resume_run():
+    if not RUN_STATE["running"] or _pause_event is None:
+        return JSONResponse({"error": "Nothing is running"}, status_code=409)
+    _pause_event.clear()
+    RUN_STATE["paused"] = False
+    return {"ok": True, "paused": False}
+
+
+@app.post("/api/run/stop")
+async def stop_run():
+    if not RUN_STATE["running"] or _stop_event is None:
+        return JSONResponse({"error": "Nothing is running"}, status_code=409)
+    _stop_event.set()
+    if _pause_event is not None:
+        _pause_event.clear()  # unblock a paused loop so it can see stop_event and exit
+    return {"ok": True, "stopping": True}
 
 
 @app.post("/api/run/{action}")
@@ -305,6 +401,7 @@ async def start_run(action: str):
 
     RUN_STATE["running"] = True
     RUN_STATE["action"] = action
+    RUN_STATE["paused"] = False
     asyncio.create_task(_run_pipeline_process(action))
     return {"ok": True, "action": action}
 

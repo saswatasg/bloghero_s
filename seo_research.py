@@ -60,21 +60,56 @@ Output ONLY the JSON object, no markdown fences, no commentary.
 """
 
 
+KEYWORD_RESEARCH_PROMPT_TEMPLATE = """You are helping plan blog content for Sierra Living Concepts, a D2C
+luxury solid-wood furniture brand (sierralivingconcepts.com/blog). Buyers
+are high-consideration - researching a large purchase (~$3,800 average),
+not browsing casually.
+
+Someone is exploring content ideas around: "{seed}"
+
+Generate a list of 15-20 specific, realistic search phrases a genuine buyer
+would type into Google around this topic - not generic single words. Mix in:
+- Direct/informational phrases ("how big should a dining table be for 6")
+- Comparison phrases ("solid wood vs veneer dining table")
+- Buying-consideration phrases ("how much does a custom dining table cost")
+- Care/maintenance phrases where relevant
+- A few longer-tail, more specific variants
+
+For each, classify its intent as one of: informational, comparison, commercial,
+or care. Also give a one-line note on why it's worth writing about.
+
+Output ONLY a JSON list of objects, no markdown fences, no commentary:
+[{{"keyword": "...", "intent": "informational", "why": "..."}}]
+"""
+
+
 def _get_client(api_key: str) -> genai.Client:
     return genai.Client(api_key=api_key)
 
 
-def _generate_with_retry(client: genai.Client, model_name: str, prompt: str, max_attempts: int = 4):
+def _generate_with_retry(client: "genai.Client", model_name: str, prompt: str, max_attempts: int = 4):
     """Same retry shape as content_writer.py's Gemini calls - kept as its own
     small copy here rather than a shared import, so this module has zero
     dependency on content_writer.py and truly can't be affected by whichever
-    provider that module is currently configured to write with."""
+    provider that module is currently configured to write with.
+
+    Same thinking-budget fix as content_writer.py applies here: without an
+    explicit config, Gemini 2.5's default reasoning can eat the whole output
+    budget and return a truncated (sometimes empty-looking) response."""
+    from google.genai import types
+
+    config = types.GenerateContentConfig(
+        max_output_tokens=4096,
+        thinking_config=types.ThinkingConfig(thinking_budget=0),
+    )
     last_error = None
     for attempt in range(max_attempts):
         try:
-            response = client.models.generate_content(model=model_name, contents=prompt)
+            response = client.models.generate_content(model=model_name, contents=prompt, config=config)
             if not getattr(response, "candidates", None):
                 raise RuntimeError("Empty response from Gemini (possibly safety-filtered)")
+            if not (response.text or "").strip():
+                raise RuntimeError("Empty text in Gemini response")
             return response
         except Exception as e:
             last_error = e
@@ -141,3 +176,39 @@ def format_brief_for_prompt(brief: dict) -> str:
     if brief.get("internal_link_ideas"):
         lines.append("Natural internal-link opportunities to keep in mind: " + ", ".join(brief["internal_link_ideas"]))
     return "\n".join(lines)
+
+
+def research_keywords(gemini_api_key: str, gemini_model: str, seed: str) -> list:
+    """On-demand keyword research, triggered from the dashboard's "Keyword
+    research" panel - NOT part of the automatic per-topic pipeline (that's
+    build_brief above). Given a seed phrase, returns AI-generated keyword
+    ideas with an intent label and a one-line rationale.
+
+    This deliberately does NOT invent search-volume numbers - there's no
+    free, honest source for those. app.py separately cross-references these
+    ideas against real GSC history (research.find_query_data) so any idea
+    that already has real impressions/position data gets tagged with it;
+    ideas with no GSC history are just that - ideas, not validated demand.
+    """
+    print(f"  Keyword research for: {seed}")
+    client = _get_client(gemini_api_key)
+    prompt = KEYWORD_RESEARCH_PROMPT_TEMPLATE.format(seed=seed)
+    response = _generate_with_retry(client, gemini_model, prompt)
+    text = re.sub(r"^```(json)?|```$", "", response.text.strip(), flags=re.MULTILINE).strip()
+    try:
+        ideas = json.loads(text)
+        if not isinstance(ideas, list):
+            raise ValueError("expected a JSON list")
+    except (json.JSONDecodeError, ValueError):
+        print("  Keyword research response wasn't valid JSON.")
+        return []
+    cleaned = []
+    for idea in ideas:
+        if isinstance(idea, dict) and idea.get("keyword"):
+            cleaned.append({
+                "keyword": str(idea["keyword"]).strip(),
+                "intent": str(idea.get("intent", "informational")).strip().lower(),
+                "why": str(idea.get("why", "")).strip(),
+            })
+    print(f"  {len(cleaned)} keyword idea(s) generated.")
+    return cleaned

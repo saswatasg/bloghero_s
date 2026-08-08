@@ -169,17 +169,47 @@ def _generate_text(cfg: dict, prompt: str) -> str:
                              cfg.get("GEMINI_TEXT_MODEL") or DEFAULT_GEMINI_MODEL, prompt)
 
 
-def _generate_gemini(api_key: str, model_name: str, prompt: str, max_attempts: int = 4) -> str:
+def _generate_gemini(api_key: str, model_name: str, prompt: str, max_attempts: int = 4,
+                      max_output_tokens: int = 8192) -> str:
     from google import genai
+    from google.genai import types
 
     client = genai.Client(api_key=api_key)
+    # IMPORTANT: Gemini 2.5 models think by default, and that reasoning is
+    # billed against the SAME output token budget as the actual answer. With
+    # no max_output_tokens set, the SDK's default can be low enough that
+    # thinking alone eats the whole budget - the response then looks
+    # "complete" (no error) but cuts off after a paragraph or two, because
+    # there were no tokens left for the rest of the answer. This was a real
+    # bug here, not a hypothetical one - drafts were coming back as a single
+    # paragraph. Fix: raise the budget explicitly AND turn thinking off for
+    # these straightforward generation tasks (drafting, fact-check JSON,
+    # humanize, metadata JSON all need writing quality, not multi-step
+    # reasoning), so the full budget goes to the actual output.
+    config = types.GenerateContentConfig(
+        max_output_tokens=max_output_tokens,
+        thinking_config=types.ThinkingConfig(thinking_budget=0),
+    )
     last_error = None
     for attempt in range(max_attempts):
         try:
-            response = client.models.generate_content(model=model_name, contents=prompt)
+            response = client.models.generate_content(model=model_name, contents=prompt, config=config)
             if not getattr(response, "candidates", None):
                 raise RuntimeError("Empty response from Gemini (possibly safety-filtered)")
-            return response.text
+            finish_reason = getattr(response.candidates[0], "finish_reason", None)
+            text = response.text or ""
+            if finish_reason is not None and str(finish_reason).upper() in ("MAX_TOKENS", "2"):
+                print(f"  Gemini response was cut off at the token limit (attempt {attempt + 1}) - retrying with more room...")
+                max_output_tokens = min(max_output_tokens * 2, 32768)
+                config = types.GenerateContentConfig(
+                    max_output_tokens=max_output_tokens,
+                    thinking_config=types.ThinkingConfig(thinking_budget=0),
+                )
+                if attempt < max_attempts - 1:
+                    continue
+            if not text.strip():
+                raise RuntimeError("Empty response from Gemini")
+            return text
         except Exception as e:
             last_error = e
             wait = 2 ** (attempt + 1)
@@ -188,7 +218,8 @@ def _generate_gemini(api_key: str, model_name: str, prompt: str, max_attempts: i
     raise RuntimeError(f"Gemini call failed after {max_attempts} attempts: {last_error}")
 
 
-def _generate_claude(api_key: str, model_name: str, prompt: str, max_attempts: int = 4) -> str:
+def _generate_claude(api_key: str, model_name: str, prompt: str, max_attempts: int = 4,
+                      max_tokens: int = 8192) -> str:
     """Requires the `anthropic` package (in requirements.txt). Kept as a
     lazy import so a Gemini-only install/user never needs it installed."""
     if not api_key:
@@ -204,10 +235,15 @@ def _generate_claude(api_key: str, model_name: str, prompt: str, max_attempts: i
         try:
             response = client.messages.create(
                 model=model_name,
-                max_tokens=4096,
+                max_tokens=max_tokens,
                 messages=[{"role": "user", "content": prompt}],
             )
             text = "".join(block.text for block in response.content if getattr(block, "type", "") == "text")
+            if response.stop_reason == "max_tokens":
+                print(f"  Claude response was cut off at the token limit (attempt {attempt + 1}) - retrying with more room...")
+                max_tokens = min(max_tokens * 2, 16384)
+                if attempt < max_attempts - 1:
+                    continue
             if not text.strip():
                 raise RuntimeError("Empty response from Claude")
             return text
@@ -238,7 +274,23 @@ def draft_post(cfg: dict, topic: str, category: str, evidence: str,
         brand_voice=BRAND_VOICE, topic=topic, category=category, evidence=evidence,
         min_words=min_words, max_words=max_words, brief_text=brief_text,
     )
-    return _generate_text(cfg, prompt)
+    draft = _generate_text(cfg, prompt)
+    word_count = len(draft.split())
+    # Defense-in-depth beyond the token-budget fix in _generate_gemini/_generate_claude:
+    # if a draft still comes back implausibly short (well under half the
+    # requested minimum), it's more useful to retry once with an explicit
+    # nudge than to silently hand back a one-paragraph "post."
+    if word_count < min_words * 0.5:
+        print(f"  Draft came back short ({word_count} words, wanted {min_words}-{max_words}) - retrying once...")
+        retry_prompt = prompt + (
+            f"\n\nIMPORTANT: your previous attempt was only {word_count} words, well short of the "
+            f"{min_words}-{max_words} word requirement. Write the FULL post this time, covering every "
+            f"subheading from the brief in real depth, not a summary or outline."
+        )
+        retry_draft = _generate_text(cfg, retry_prompt)
+        if len(retry_draft.split()) > word_count:
+            draft = retry_draft
+    return draft
 
 
 def fact_check(cfg: dict, draft: str) -> list:

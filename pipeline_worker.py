@@ -48,10 +48,12 @@ class _QueueWriter(io.TextIOBase):
         pass
 
 
-def worker_entry(action: str, queue):
+def worker_entry(action: str, queue, pause_event=None, stop_event=None):
     """Entry point for the child process. Puts a final `None` sentinel onto
     the queue when done (success or failure) so the parent knows to stop
-    reading."""
+    reading. pause_event/stop_event are multiprocessing.Manager Events,
+    created fresh per run in app.py and passed down here - see runner.py's
+    run_write for how they're checked (between topics only)."""
     writer = _QueueWriter(queue)
     with contextlib.redirect_stdout(writer):
         try:
@@ -59,7 +61,7 @@ def worker_entry(action: str, queue):
             if action in ("research", "run-all"):
                 runner.run_research(cfg)
             if action in ("write", "run-all"):
-                runner.run_write(cfg)
+                runner.run_write(cfg, pause_event=pause_event, stop_event=stop_event)
             print(">>> Done.")
         except Exception as e:
             print(f">>> Run failed: {e}")
