@@ -78,18 +78,52 @@ def generate_ai_image(api_key: str, model_name: str, prompt: str, out_path: str)
 
 def select_images_for_post(api_key: str, image_model: str, topic: str, category: str,
                             out_dir: str = None) -> dict:
-    """Returns {"hero_image": path_or_url, "source": "product"|"ai_generated", "product_links": [...]}"""
+    """Returns {"hero_image": path_or_url, "source": "product"|"ai_generated",
+    "product_links": [...], "body_images": [{"ref": path_or_url, "alt": str,
+    "source": "product"|"ai_generated"}, ...]}
+
+    hero_image is used as WordPress's featured image. body_images are
+    separate pictures actually EMBEDDED in the post body - see
+    runner.py's image-embedding step for where they get placed. Kept
+    genuinely different from the hero where possible (a different matching
+    product, or a distinctly different AI prompt) rather than repeating
+    the same image three times."""
     out_dir = out_dir or str(paths.GENERATED_IMAGES_DIR)
     Path(out_dir).mkdir(parents=True, exist_ok=True)
-    matches = find_matching_products(topic, category)
+    matches = find_matching_products(topic, category, limit=3)
+
     if matches:
-        return {
-            "hero_image": matches[0]["image_url"],
-            "source": "product",
-            "product_links": [m["product_page_url"] for m in matches],
-        }
-    # No catalog match - fall back to AI generation.
-    safe_name = "".join(c if c.isalnum() else "_" for c in topic.lower())[:60]
-    out_path = f"{out_dir}/{safe_name}.png"
-    path = generate_ai_image(api_key, image_model, topic, out_path)
-    return {"hero_image": path, "source": "ai_generated", "product_links": []}
+        hero = {"hero_image": matches[0]["image_url"], "source": "product",
+                "product_links": [m["product_page_url"] for m in matches]}
+    else:
+        safe_name = "".join(c if c.isalnum() else "_" for c in topic.lower())[:60]
+        hero_path = f"{out_dir}/{safe_name}_hero.png"
+        path = generate_ai_image(api_key, image_model, topic, hero_path)
+        hero = {"hero_image": path, "source": "ai_generated", "product_links": []}
+
+    body_images = []
+    # Prefer additional real product photos not already used as the hero.
+    remaining_matches = matches[1:] if matches else []
+    for m in remaining_matches[:2]:
+        body_images.append({"ref": m["image_url"], "alt": m.get("category", topic), "source": "product"})
+
+    # Top up to 2 body images with distinct AI-generated shots if real
+    # photos didn't cover it - different prompt angle per slot so they
+    # don't look like near-duplicates of the hero or each other.
+    fallback_prompts = [
+        f"A close-up detail shot showing the wood grain and craftsmanship relevant to {topic}.",
+        f"A lifestyle photograph showing {topic} in a real, lived-in room setting.",
+    ]
+    slot = 0
+    while len(body_images) < 2 and slot < len(fallback_prompts):
+        safe_name = "".join(c if c.isalnum() else "_" for c in topic.lower())[:60]
+        body_path = f"{out_dir}/{safe_name}_body{slot}.png"
+        try:
+            path = generate_ai_image(api_key, image_model, fallback_prompts[slot], body_path)
+            body_images.append({"ref": path, "alt": topic, "source": "ai_generated"})
+        except Exception as e:
+            print(f"  Body image generation failed for slot {slot} (post will have fewer images): {e}")
+        slot += 1
+
+    hero["body_images"] = body_images
+    return hero

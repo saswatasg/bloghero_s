@@ -422,11 +422,13 @@ async function refreshDrafts() {
   }
   drafts.forEach((d) => {
     const card = document.createElement("div");
-    card.className = "draft-card";
+    card.className = "draft-card" + (d.needs_review ? " draft-card-flagged" : "");
     card.innerHTML = `
-      <div class="draft-title">${d.is_revival ? "\u267B\uFE0F " : ""}${d.title}</div>
+      <div class="draft-title">${d.is_revival ? "\u267B\uFE0F " : ""}${d.needs_review ? "\u26A0\uFE0F " : ""}${d.title}</div>
       <div class="draft-meta">${d.meta_description || ""}
+        ${d.word_count ? `<span class="word-count"> \u2022 ${d.word_count} words</span>` : ""}
         ${d.fact_check_flags > 0 ? `<span class="flag-count"> \u2022 ${d.fact_check_flags} fact-check flag(s)</span>` : ""}
+        ${d.needs_review ? `<span class="needs-review-badge"> \u2022 NEEDS REVIEW: short of target length</span>` : ""}
       </div>
     `;
     card.onclick = async () => {

@@ -269,12 +269,16 @@ async def drafts():
         title_match = re.search(r"^#\s*(.+)$", text, re.MULTILINE)
         meta_match = re.search(r"<!--\s*meta_description:\s*(.*?)\s*-->", text)
         flags_match = re.search(r"<!--\s*fact_check_flags:\s*(\d+)\s*-->", text)
+        word_count_match = re.search(r"<!--\s*word_count:\s*(\d+)\s*-->", text)
+        needs_review_match = re.search(r"<!--\s*NEEDS_REVIEW:\s*(.*?)\s*-->", text)
         out.append({
             "filename": path.name,
             "is_revival": path.name.startswith("REVIVAL_"),
             "title": title_match.group(1) if title_match else path.stem,
             "meta_description": meta_match.group(1) if meta_match else "",
             "fact_check_flags": int(flags_match.group(1)) if flags_match else 0,
+            "word_count": int(word_count_match.group(1)) if word_count_match else None,
+            "needs_review": needs_review_match.group(1) if needs_review_match else None,
             "preview": text[:600],
             "full_length": len(text),
         })

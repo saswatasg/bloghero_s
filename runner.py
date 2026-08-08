@@ -7,13 +7,18 @@ that used input() or print()-only CLI flow has been removed; print()
 statements stay, since app.py captures stdout to stream into the dashboard's
 live log panel.
 
+Queue ordering: GAP/MANUAL (new topics) are ALWAYS written before any
+REVIVAL, regardless of priority level - see _load_queued_topics.
+
 Write pipeline per GAP/MANUAL topic, in order:
-  1. seo_research.build_brief()   - detailed research brief (always Gemini)
-  2. content_writer.draft_post()  - first draft (Gemini or Claude, per config)
-  3. content_writer.fact_check()  - flags claims to verify, on the RAW draft
-  4. content_writer.humanize_draft() - polish pass, after facts are flagged
+  1. seo_research.build_brief()        - detailed research brief (always Gemini)
+  1b. internal_links.build_link_index() - real, verified internal link candidates
+  2. content_writer.draft_post()       - draft with a hard word-count gate
+                                          (Gemini or Claude, per config)
+  3. content_writer.fact_check()       - flags claims to verify, on the RAW draft
+  4. content_writer.humanize_draft()   - polish pass, after facts are flagged
   5. content_writer.generate_seo_metadata() - metadata from the FINAL text
-  6. image_handler.select_images_for_post()
+  6. image_handler.select_images_for_post() + embed body images inline
   7. save locally + optionally push a WordPress draft + log to Sheet
 """
 
@@ -23,6 +28,7 @@ import time
 import content_writer
 import gsc_client
 import image_handler
+import internal_links
 import paths
 import research
 import seo_research
@@ -34,13 +40,20 @@ DRAFTS_DIR = paths.DRAFTS_DIR
 
 
 def _load_queued_topics(limit: int) -> list:
+    """New topics (GAP/MANUAL) are ALWAYS processed before any REVIVAL,
+    regardless of priority level - a Critical REVIVAL still waits behind a
+    Low-priority GAP. Within each of those two groups, priority still
+    applies. This is a deliberate, strict rule (not just a sort-order
+    nudge): growing the content library takes precedence over touching up
+    what already exists, every run."""
     if not BACKLOG_PATH.exists():
         return []
     with open(BACKLOG_PATH, newline="", encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
     queued = [r for r in rows if r["status"] == "queued"]
     priority_order = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3}
-    queued.sort(key=lambda r: priority_order.get(r["priority"], 9))
+    type_order = {"GAP": 0, "MANUAL": 0, "REVIVAL": 1}
+    queued.sort(key=lambda r: (type_order.get(r["type"], 0), priority_order.get(r["priority"], 9)))
     return queued[:limit]
 
 
@@ -134,6 +147,57 @@ def run_keyword_research(cfg: dict, seed: str) -> list:
     return ideas
 
 
+def _embed_body_images(cfg: dict, md: str, body_images: list) -> str:
+    """Resolves each body image to an embeddable URL (uploads AI-generated
+    local files to WordPress media if configured, uses real product photo
+    URLs directly - see wordpress_publisher.resolve_image_url) and inserts
+    markdown image syntax after the 1st and roughly-middle H2 heading.
+    Images that fail to resolve are skipped, not left as broken links."""
+    if not body_images:
+        return md
+
+    resolved = []
+    for img in body_images:
+        if cfg.get("WP_SITE_URL") and cfg.get("WP_USERNAME"):
+            url = wordpress_publisher.resolve_image_url(
+                cfg["WP_SITE_URL"], cfg["WP_USERNAME"], cfg.get("WP_APP_PASSWORD", ""), img["ref"],
+            )
+        else:
+            # No WordPress configured - use directly if already a public
+            # URL (real product photo); a local AI-generated file can't be
+            # embedded as a working web image without an upload target, so
+            # skip it in local-only mode rather than write a broken link.
+            url = img["ref"] if img["ref"].startswith("http") else ""
+        if url:
+            resolved.append(f'![{img["alt"]}]({url})')
+        else:
+            print(f"  Skipping one body image (couldn't resolve a usable URL): {img['ref']}")
+
+    if not resolved:
+        return md
+
+    lines = md.split("\n")
+    h2_indices = [i for i, line in enumerate(lines) if line.strip().startswith("## ")]
+    if not h2_indices:
+        # No H2 headings found (unexpected but not fatal) - just append images at the end.
+        return md + "\n\n" + "\n\n".join(resolved) + "\n"
+
+    insert_at = []
+    if len(resolved) >= 1:
+        insert_at.append(h2_indices[0])  # right after the first H2 section starts
+    if len(resolved) >= 2 and len(h2_indices) > 1:
+        insert_at.append(h2_indices[len(h2_indices) // 2])
+    elif len(resolved) >= 2:
+        insert_at.append(h2_indices[0])  # only one H2 - both go near it, still valid
+
+    # Insert from the bottom up so earlier insertions don't shift later indices.
+    for image_md, idx in sorted(zip(resolved, insert_at), key=lambda x: x[1], reverse=True):
+        lines.insert(idx + 1, "")
+        lines.insert(idx + 2, image_md)
+        lines.insert(idx + 3, "")
+    return "\n".join(lines)
+
+
 def _handle_gap(cfg, t):
     # Step 1 of writing: detailed SEO research brief for THIS topic - always
     # Gemini, independent of WRITER_PROVIDER (see seo_research.py docstring).
@@ -146,29 +210,48 @@ def _handle_gap(cfg, t):
         print(f"  SEO research step failed, continuing without a brief: {e}")
         brief = {}
 
+    # Step 1b: build/reuse the internal link index and shortlist candidates
+    # for THIS topic - real, verified pages only (see internal_links.py).
+    try:
+        link_index = internal_links.build_link_index(cfg)
+        link_candidates = internal_links.shortlist_relevant_links(
+            link_index, topic=t["topic_or_page"], category=t["category"], max_candidates=12,
+        )
+        print(f"  {len(link_candidates)} internal link candidate(s) shortlisted for this topic.")
+    except Exception as e:
+        print(f"  Internal link index unavailable, continuing without link candidates: {e}")
+        link_candidates = []
+
     # Step 2: first draft, on whichever provider WRITER_PROVIDER selects.
+    # Includes the hard word-count gate (up to 3 attempts) and internal-link
+    # validation - see content_writer.draft_post.
     provider = (cfg.get("WRITER_PROVIDER") or "gemini").strip().lower()
     print(f"  Drafting with {'Claude' if provider == 'claude' else 'Gemini'}...")
-    draft_md = content_writer.draft_post(
+    draft_result = content_writer.draft_post(
         cfg=cfg, topic=t["topic_or_page"], category=t["category"], evidence=t["evidence"],
         min_words=int(cfg.get("MIN_WORD_COUNT", 1200)), max_words=int(cfg.get("MAX_WORD_COUNT", 1500)),
-        brief=brief,
+        brief=brief, internal_link_candidates=link_candidates,
     )
+    draft_md = draft_result["draft"]
 
     # Step 3: fact-check the RAW draft, before any stylistic polishing.
     flags = content_writer.fact_check(cfg=cfg, draft=draft_md)
 
-    # Step 4: humanize pass - polish tone/rhythm, keep facts and [VERIFY:...] intact.
+    # Step 4: humanize pass - polish tone/rhythm, keep facts, [VERIFY:...],
+    # and internal links intact (explicitly instructed not to touch markdown links).
     print("  Running humanize pass...")
     final_md = content_writer.humanize_draft(cfg=cfg, draft=draft_md)
 
     # Step 5: SEO metadata from the FINAL (humanized) text.
     seo = content_writer.generate_seo_metadata(cfg=cfg, draft=final_md)
 
+    # Step 6: images - hero (featured image) + up to 2 in-body images,
+    # embedded directly into the post content.
     images = image_handler.select_images_for_post(
         api_key=cfg["GEMINI_API_KEY"], image_model=cfg.get("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image"),
         topic=t["topic_or_page"], category=t["category"],
     )
+    final_md = _embed_body_images(cfg, final_md, images.get("body_images", []))
 
     safe_name = "".join(c if c.isalnum() else "_" for c in t["topic_or_page"].lower())[:60]
     local_path = DRAFTS_DIR / f"{safe_name}.md"
@@ -176,16 +259,27 @@ def _handle_gap(cfg, t):
         f.write(f"# {seo.get('title') or t['topic_or_page']}\n\n")
         f.write(f"<!-- meta_description: {seo.get('meta_description', '')} -->\n")
         f.write(f"<!-- fact_check_flags: {len(flags)} -->\n")
-        f.write(f"<!-- written_with: {provider} -->\n\n")
+        f.write(f"<!-- written_with: {provider} -->\n")
+        f.write(f"<!-- word_count: {draft_result['word_count']} -->\n")
+        if not draft_result["length_ok"]:
+            f.write(f"<!-- NEEDS_REVIEW: word count {draft_result['word_count']} is short of the "
+                     f"{cfg.get('MIN_WORD_COUNT', 1200)}-{cfg.get('MAX_WORD_COUNT', 1500)} target "
+                     f"after {draft_result['attempts']} attempts -->\n")
+        f.write("\n")
         f.write(final_md)
     print(f"Saved local draft: {local_path}")
+    if not draft_result["length_ok"]:
+        print(f"  NEEDS REVIEW: final word count ({draft_result['word_count']}) is still short of target.")
 
     edit_link = ""
     if cfg.get("WP_SITE_URL") and cfg.get("WP_USERNAME"):
         try:
+            title = seo.get("title") or t["topic_or_page"]
+            if not draft_result["length_ok"]:
+                title = f"[NEEDS REVIEW - short] {title}"
             result = wordpress_publisher.create_draft_post(
                 site_url=cfg["WP_SITE_URL"], username=cfg["WP_USERNAME"], app_password=cfg["WP_APP_PASSWORD"],
-                title=seo.get("title") or t["topic_or_page"], markdown_body=final_md, slug=seo.get("slug", ""),
+                title=title, markdown_body=final_md, slug=seo.get("slug", ""),
                 meta_description=seo.get("meta_description", ""), featured_image_url=images.get("hero_image", ""),
             )
             edit_link = result["edit_link"]
@@ -195,7 +289,7 @@ def _handle_gap(cfg, t):
     else:
         print("WordPress not configured - local file only.")
 
-    _log_to_sheet(cfg, t, edit_link or str(local_path), images.get("source", ""), len(flags), len(final_md.split()))
+    _log_to_sheet(cfg, t, edit_link or str(local_path), images.get("source", ""), len(flags), draft_result["word_count"])
 
 
 def _handle_revival(cfg, t):
@@ -249,7 +343,8 @@ def run_write(cfg: dict, pause_event=None, stop_event=None):
         return
 
     print(f">>> Step 2: Write - drafting {len(topics)} topic(s)...")
-    print("    Each GAP/MANUAL topic runs: SEO research \u2192 draft \u2192 fact-check \u2192 humanize \u2192 SEO metadata.")
+    print("    Each GAP/MANUAL topic runs: SEO research \u2192 internal links \u2192 draft (word-count gated) "
+          "\u2192 fact-check \u2192 humanize \u2192 SEO metadata \u2192 images embedded.")
     for t in topics:
         if stop_event is not None and stop_event.is_set():
             print("\n>>> Stopped. Remaining queued topics were left untouched.")

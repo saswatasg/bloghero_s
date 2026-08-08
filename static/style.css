@@ -267,6 +267,9 @@ td { padding: 6px 8px; border-bottom: 1px solid var(--grey-border); }
 .draft-card .draft-title { font-weight: 700; font-size: 13.5px; color: var(--navy); }
 .draft-card .draft-meta { font-size: 11.5px; color: var(--muted); margin-top: 3px; }
 .flag-count { color: var(--red); font-weight: 700; }
+.word-count { color: var(--muted); }
+.needs-review-badge { color: #A85D00; font-weight: 700; }
+.draft-card-flagged { border-color: #F0C674; background: #FFFBF0; }
 
 /* ---------------- Modal ---------------- */
 .modal {

@@ -50,6 +50,11 @@ and real questions buyers are asking; don't ignore it in favor of generic
 structure):
 {brief_text}
 
+Internal links you may use (REAL pages that actually exist on the site right
+now - use ONLY urls from this list, never invent or guess a URL, never modify
+one):
+{internal_links_text}
+
 Requirements:
 - {min_words}-{max_words} words.
 - Open with a direct, specific answer to the core question in the first
@@ -65,8 +70,16 @@ Requirements:
 - Structure with clear H2/H3 subheadings (use markdown ##/###).
 - Naturally mention solid wood construction quality where genuinely relevant
   to the topic - do not force a sales pitch into every paragraph.
+- Link to 2-4 of the internal pages listed above where it's genuinely useful
+  to the reader - a product/category link when discussing a specific type of
+  furniture, a blog link when a related question is covered elsewhere on the
+  site. Use natural anchor text (never "click here" or the raw URL). Do NOT
+  force a link where none of the candidates genuinely fit - it's fine to use
+  fewer than 2 if nothing matches well, and fine to skip entirely if the
+  candidate list is empty.
 - End with a short, useful takeaway - not a generic call-to-action.
-- Do NOT invent specific product names, prices, or SKUs.
+- Do NOT invent specific product names, prices, or SKUs outside of what's
+  in the internal links list above.
 
 Output as markdown, ready to review.
 """
@@ -264,33 +277,96 @@ def _strip_json_fences(text: str) -> str:
 # ---------------------------------------------------------------------------
 
 def draft_post(cfg: dict, topic: str, category: str, evidence: str,
-                min_words: int, max_words: int, brief: dict = None) -> str:
+                min_words: int, max_words: int, brief: dict = None,
+                internal_link_candidates: list = None) -> dict:
     """`brief` is the dict from seo_research.build_brief() - optional so this
-    still works if the research step was skipped or failed for this topic."""
+    still works if the research step was skipped or failed for this topic.
+    `internal_link_candidates` is the shortlist from
+    internal_links.shortlist_relevant_links() - real {url, title, kind}
+    dicts the model is allowed to link to; never invented.
+
+    Returns {"draft": str, "word_count": int, "length_ok": bool,
+    "attempts": int} - length_ok is the hard-gate result: True if the final
+    attempt landed inside [min_words, max_words] (or within 10% under - see
+    below), False if every retry still came up short and the draft needs a
+    human's attention before it's considered done. Callers (runner.py)
+    surface length_ok in the saved draft so it's never silently hidden."""
     import seo_research
 
     brief_text = seo_research.format_brief_for_prompt(brief or {})
+    links_text = _format_internal_links(internal_link_candidates or [])
+    allowed_urls = {c["url"] for c in (internal_link_candidates or [])}
+
     prompt = DRAFT_PROMPT_TEMPLATE.format(
         brand_voice=BRAND_VOICE, topic=topic, category=category, evidence=evidence,
         min_words=min_words, max_words=max_words, brief_text=brief_text,
+        internal_links_text=links_text,
     )
-    draft = _generate_text(cfg, prompt)
-    word_count = len(draft.split())
-    # Defense-in-depth beyond the token-budget fix in _generate_gemini/_generate_claude:
-    # if a draft still comes back implausibly short (well under half the
-    # requested minimum), it's more useful to retry once with an explicit
-    # nudge than to silently hand back a one-paragraph "post."
-    if word_count < min_words * 0.5:
-        print(f"  Draft came back short ({word_count} words, wanted {min_words}-{max_words}) - retrying once...")
-        retry_prompt = prompt + (
-            f"\n\nIMPORTANT: your previous attempt was only {word_count} words, well short of the "
-            f"{min_words}-{max_words} word requirement. Write the FULL post this time, covering every "
-            f"subheading from the brief in real depth, not a summary or outline."
-        )
-        retry_draft = _generate_text(cfg, retry_prompt)
-        if len(retry_draft.split()) > word_count:
-            draft = retry_draft
-    return draft
+
+    # Hard length gate: up to 3 attempts total, each with an increasingly
+    # explicit nudge about the shortfall. A draft within 10% under min_words
+    # is accepted (retrying forever over a handful of words isn't worth the
+    # API cost) - anything short of THAT after 3 attempts is saved anyway
+    # (so nothing is lost) but flagged length_ok=False for a human to see.
+    draft = ""
+    word_count = 0
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        draft = _generate_text(cfg, prompt)
+        draft, stripped = _validate_internal_links(draft, allowed_urls)
+        if stripped:
+            print(f"  Stripped {stripped} invented/unlisted internal link(s) from the draft (kept as plain text).")
+        word_count = len(draft.split())
+        if word_count >= min_words * 0.9:
+            break
+        if attempt < max_attempts:
+            print(f"  Draft attempt {attempt}: {word_count} words (wanted {min_words}-{max_words}) - retrying with a stronger nudge...")
+            prompt = DRAFT_PROMPT_TEMPLATE.format(
+                brand_voice=BRAND_VOICE, topic=topic, category=category, evidence=evidence,
+                min_words=min_words, max_words=max_words, brief_text=brief_text,
+                internal_links_text=links_text,
+            ) + (
+                f"\n\nIMPORTANT: your previous attempt was only {word_count} words, well short of the "
+                f"{min_words}-{max_words} word requirement. Write the FULL post this time - cover every "
+                f"subheading from the brief in real depth, with complete paragraphs, not a summary or outline."
+            )
+
+    length_ok = word_count >= min_words * 0.9
+    if not length_ok:
+        print(f"  WARNING: draft still only {word_count} words after {max_attempts} attempts "
+              f"(target {min_words}-{max_words}) - saving anyway, flagged for review.")
+    return {"draft": draft, "word_count": word_count, "length_ok": length_ok, "attempts": max_attempts}
+
+
+def _format_internal_links(candidates: list) -> str:
+    if not candidates:
+        return "(No internal link candidates available for this topic - don't add any internal links.)"
+    lines = [f"- {c['title']} | {c['url']} | ({c['kind']})" for c in candidates]
+    return "\n".join(lines)
+
+
+_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
+
+
+def _validate_internal_links(draft: str, allowed_urls: set) -> tuple:
+    """Safety net run on every draft attempt (not just once at the end):
+    scans for markdown links and strips (converts back to plain text) any
+    whose URL isn't in the allowed shortlist - a model hallucinating a
+    plausible-looking but nonexistent product URL is a real failure mode
+    worth guarding against structurally, not just hoping the prompt is
+    followed. Returns (cleaned_draft, count_stripped)."""
+    stripped = 0
+
+    def _replace(match):
+        nonlocal stripped
+        text, url = match.group(1), match.group(2)
+        if url in allowed_urls:
+            return match.group(0)
+        stripped += 1
+        return text
+
+    cleaned = _MD_LINK_RE.sub(_replace, draft)
+    return cleaned, stripped
 
 
 def fact_check(cfg: dict, draft: str) -> list:
