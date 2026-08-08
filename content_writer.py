@@ -286,11 +286,12 @@ def draft_post(cfg: dict, topic: str, category: str, evidence: str,
     dicts the model is allowed to link to; never invented.
 
     Returns {"draft": str, "word_count": int, "length_ok": bool,
-    "attempts": int} - length_ok is the hard-gate result: True if the final
-    attempt landed inside [min_words, max_words] (or within 10% under - see
-    below), False if every retry still came up short and the draft needs a
-    human's attention before it's considered done. Callers (runner.py)
-    surface length_ok in the saved draft so it's never silently hidden."""
+    "attempts": int} - length_ok is the hard-gate result: True only if the
+    final attempt landed strictly inside [min_words, max_words] (both
+    bounds enforced - no tolerance band), False if every retry was still
+    under min_words or over max_words and the draft is a human's attention
+    before it's considered done. Callers (runner.py) surface length_ok in
+    the saved draft so it's never silently hidden."""
     import seo_research
 
     brief_text = seo_research.format_brief_for_prompt(brief or {})
@@ -302,38 +303,47 @@ def draft_post(cfg: dict, topic: str, category: str, evidence: str,
         min_words=min_words, max_words=max_words, brief_text=brief_text,
         internal_links_text=links_text,
     )
-
-    # Hard length gate: up to 3 attempts total, each with an increasingly
-    # explicit nudge about the shortfall. A draft within 10% under min_words
-    # is accepted (retrying forever over a handful of words isn't worth the
-    # API cost) - anything short of THAT after 3 attempts is saved anyway
-    # (so nothing is lost) but flagged length_ok=False for a human to see.
+    # Hard length gate: up to 4 attempts total, each with an increasingly
+    # explicit nudge about the shortfall. A draft is ONLY accepted when its
+    # word count lands inside [min_words, max_words] - a post is required to
+    # be at least min_words and at most max_words, with no tolerance band.
+    # Anything still out of range after 4 attempts is saved anyway (so
+    # nothing is lost) but flagged length_ok=False for a human to see.
     draft = ""
     word_count = 0
-    max_attempts = 3
+    max_attempts = 4
     for attempt in range(1, max_attempts + 1):
         draft = _generate_text(cfg, prompt)
         draft, stripped = _validate_internal_links(draft, allowed_urls)
         if stripped:
             print(f"  Stripped {stripped} invented/unlisted internal link(s) from the draft (kept as plain text).")
         word_count = len(draft.split())
-        if word_count >= min_words * 0.9:
+        if min_words <= word_count <= max_words:
             break
         if attempt < max_attempts:
-            print(f"  Draft attempt {attempt}: {word_count} words (wanted {min_words}-{max_words}) - retrying with a stronger nudge...")
+            if word_count < min_words:
+                print(f"  Draft attempt {attempt}: {word_count} words (wanted {min_words}-{max_words}) - retrying with a longer-write nudge...")
+                nudge = (
+                    f"\n\nIMPORTANT: your previous attempt was only {word_count} words, well short of the "
+                    f"{min_words}-{max_words} word requirement. Write the FULL post this time - cover every "
+                    "subheading from the brief in real depth, with complete paragraphs, not a summary or outline."
+                )
+            else:
+                print(f"  Draft attempt {attempt}: {word_count} words (wanted {min_words}-{max_words}) - retrying with a trim nudge...")
+                nudge = (
+                    f"\n\nIMPORTANT: your previous attempt was {word_count} words - over the {max_words}-word "
+                    f"maximum. Trim redundant sentences, filler phrases, and repeated examples to land inside "
+                    f"{min_words}-{max_words} words while keeping every fact, subheading, and required answer intact."
+                )
             prompt = DRAFT_PROMPT_TEMPLATE.format(
                 brand_voice=BRAND_VOICE, topic=topic, category=category, evidence=evidence,
                 min_words=min_words, max_words=max_words, brief_text=brief_text,
                 internal_links_text=links_text,
-            ) + (
-                f"\n\nIMPORTANT: your previous attempt was only {word_count} words, well short of the "
-                f"{min_words}-{max_words} word requirement. Write the FULL post this time - cover every "
-                f"subheading from the brief in real depth, with complete paragraphs, not a summary or outline."
-            )
+            ) + nudge
 
-    length_ok = word_count >= min_words * 0.9
+    length_ok = min_words <= word_count <= max_words
     if not length_ok:
-        print(f"  WARNING: draft still only {word_count} words after {max_attempts} attempts "
+        print(f"  WARNING: draft is {word_count} words after {max_attempts} attempts "
               f"(target {min_words}-{max_words}) - saving anyway, flagged for review.")
     return {"draft": draft, "word_count": word_count, "length_ok": length_ok, "attempts": max_attempts}
 
@@ -378,20 +388,47 @@ def fact_check(cfg: dict, draft: str) -> list:
         return [{"claim": "PARSE_ERROR", "why_flagged": text}]
 
 
-def humanize_draft(cfg: dict, draft: str) -> str:
+def humanize_draft(cfg: dict, draft: str, min_words: int = None, max_words: int = None) -> dict:
     """Final polish pass, run AFTER fact-check and BEFORE SEO metadata is
     generated (so the metadata reflects the actual final wording). Runs on
     whichever provider WRITER_PROVIDER is set to, same as drafting - a
-    consistent voice matters more here than mixing providers mid-pipeline."""
-    prompt = HUMANIZE_PROMPT_TEMPLATE.format(brand_voice=BRAND_VOICE, draft=draft)
-    humanized = _generate_text(cfg, prompt).strip()
-    # Defensive floor: if the model returned something drastically shorter
-    # (e.g. it misread the instruction and summarized instead of polishing),
-    # keep the original rather than silently publishing a truncated post.
-    if len(humanized) < 0.5 * len(draft):
-        print("  Humanize pass returned a much shorter draft than expected - keeping the pre-humanize version.")
-        return draft
-    return humanized
+    consistent voice matters more here than mixing providers mid-pipeline.
+
+    When min_words/max_words are given, this ALSO enforces the final
+    word-count gate on the HUMANIZED text (the draft gate in draft_post
+    only covers the pre-polish version): if the polished draft falls
+    outside [min_words, max_words], the polish pass is retried (up to 2
+    extra attempts) with an explicit count-matching instruction. Returns
+    {"text", "word_count", "in_range"} so callers know the final answer."""
+    max_attempts = 3 if (min_words is not None and max_words is not None) else 1
+    polished = ""
+    for attempt in range(1, max_attempts + 1):
+        if attempt == 1:
+            prompt = HUMANIZE_PROMPT_TEMPLATE.format(brand_voice=BRAND_VOICE, draft=draft)
+        else:
+            prompt = HUMANIZE_PROMPT_TEMPLATE.format(brand_voice=BRAND_VOICE, draft=polished) + (
+                f"\n\nIMPORTANT: your polished version was {len(polished.split())} words, but the required "
+                f"range is {min_words}-{max_words} words. Adjust the polish so the final text lands strictly "
+                f"inside that range - expand thin sections if under, cut filler if over - without changing "
+                f"meaning, facts, headings, or the internal links."
+            )
+        polished = _generate_text(cfg, prompt).strip()
+        # Defensive floor: if the model returned something drastically shorter
+        # (e.g. it misread the instruction and summarized instead of polishing),
+        # keep the original rather than silently publishing a truncated post.
+        if len(polished) < 0.5 * len(draft):
+            print("  Humanize pass returned a much shorter draft than expected - keeping the pre-humanize version.")
+            polished = draft
+            return {"text": draft, "word_count": len(draft.split()), "in_range": False}
+        count = len(polished.split())
+        if min_words is None or max_words is None or (min_words <= count <= max_words):
+            break
+        print(f"  Humanize attempt {attempt}: {count} words (wanted {min_words}-{max_words}) - retrying with a count nudge...")
+    count = len(polished.split())
+    in_range = (min_words is None) or (max_words is None) or (min_words <= count <= max_words)
+    if not in_range:
+        print(f"  WARNING: final humanized text is {count} words (target {min_words}-{max_words}) - flagged for review.")
+    return {"text": polished, "word_count": count, "in_range": in_range}
 
 
 def generate_seo_metadata(cfg: dict, draft: str) -> dict:

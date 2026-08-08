@@ -13,10 +13,12 @@ REVIVAL, regardless of priority level - see _load_queued_topics.
 Write pipeline per GAP/MANUAL topic, in order:
   1. seo_research.build_brief()        - detailed research brief (always Gemini)
   1b. internal_links.build_link_index() - real, verified internal link candidates
-  2. content_writer.draft_post()       - draft with a hard word-count gate
-                                          (Gemini or Claude, per config)
+  2. content_writer.draft_post()       - draft with a strict 1200-1500 word
+                                          gate (both bounds enforced, Gemini
+                                          or Claude per config)
   3. content_writer.fact_check()       - flags claims to verify, on the RAW draft
-  4. content_writer.humanize_draft()   - polish pass, after facts are flagged
+  4. content_writer.humanize_draft()   - polish pass with the same 1200-1500
+                                          gate re-checked on the FINAL text
   5. content_writer.generate_seo_metadata() - metadata from the FINAL text
   6. image_handler.select_images_for_post() + embed body images inline
   7. save locally + optionally push a WordPress draft + log to Sheet
@@ -223,13 +225,15 @@ def _handle_gap(cfg, t):
         link_candidates = []
 
     # Step 2: first draft, on whichever provider WRITER_PROVIDER selects.
-    # Includes the hard word-count gate (up to 3 attempts) and internal-link
+    # Includes the hard word-count gate (up to 4 attempts) and internal-link
     # validation - see content_writer.draft_post.
     provider = (cfg.get("WRITER_PROVIDER") or "gemini").strip().lower()
     print(f"  Drafting with {'Claude' if provider == 'claude' else 'Gemini'}...")
+    min_words = int(cfg.get("MIN_WORD_COUNT", 1200))
+    max_words = int(cfg.get("MAX_WORD_COUNT", 1500))
     draft_result = content_writer.draft_post(
         cfg=cfg, topic=t["topic_or_page"], category=t["category"], evidence=t["evidence"],
-        min_words=int(cfg.get("MIN_WORD_COUNT", 1200)), max_words=int(cfg.get("MAX_WORD_COUNT", 1500)),
+        min_words=min_words, max_words=max_words,
         brief=brief, internal_link_candidates=link_candidates,
     )
     draft_md = draft_result["draft"]
@@ -239,8 +243,13 @@ def _handle_gap(cfg, t):
 
     # Step 4: humanize pass - polish tone/rhythm, keep facts, [VERIFY:...],
     # and internal links intact (explicitly instructed not to touch markdown links).
+    # Also re-enforces the 1200-1500 word gate on the FINAL text - the count
+    # stored and reviewed below is the humanized one, not the raw draft's.
     print("  Running humanize pass...")
-    final_md = content_writer.humanize_draft(cfg=cfg, draft=draft_md)
+    humanized = content_writer.humanize_draft(cfg=cfg, draft=draft_md, min_words=min_words, max_words=max_words)
+    final_md = humanized["text"]
+    final_count = humanized["word_count"]
+    final_length_ok = humanized["in_range"]
 
     # Step 5: SEO metadata from the FINAL (humanized) text.
     seo = content_writer.generate_seo_metadata(cfg=cfg, draft=final_md)
@@ -260,23 +269,22 @@ def _handle_gap(cfg, t):
         f.write(f"<!-- meta_description: {seo.get('meta_description', '')} -->\n")
         f.write(f"<!-- fact_check_flags: {len(flags)} -->\n")
         f.write(f"<!-- written_with: {provider} -->\n")
-        f.write(f"<!-- word_count: {draft_result['word_count']} -->\n")
-        if not draft_result["length_ok"]:
-            f.write(f"<!-- NEEDS_REVIEW: word count {draft_result['word_count']} is short of the "
-                     f"{cfg.get('MIN_WORD_COUNT', 1200)}-{cfg.get('MAX_WORD_COUNT', 1500)} target "
-                     f"after {draft_result['attempts']} attempts -->\n")
+        f.write(f"<!-- word_count: {final_count} -->\n")
+        if not final_length_ok:
+            f.write(f"<!-- NEEDS_REVIEW: word count {final_count} is outside the "
+                     f"{min_words}-{max_words} target after drafting and the humanize pass -->\n")
         f.write("\n")
         f.write(final_md)
     print(f"Saved local draft: {local_path}")
-    if not draft_result["length_ok"]:
-        print(f"  NEEDS REVIEW: final word count ({draft_result['word_count']}) is still short of target.")
+    if not final_length_ok:
+        print(f"  NEEDS REVIEW: final word count ({final_count}) is outside the {min_words}-{max_words} target.")
 
     edit_link = ""
     if cfg.get("WP_SITE_URL") and cfg.get("WP_USERNAME"):
         try:
             title = seo.get("title") or t["topic_or_page"]
-            if not draft_result["length_ok"]:
-                title = f"[NEEDS REVIEW - short] {title}"
+            if not final_length_ok:
+                title = f"[NEEDS REVIEW - word count] {title}"
             result = wordpress_publisher.create_draft_post(
                 site_url=cfg["WP_SITE_URL"], username=cfg["WP_USERNAME"], app_password=cfg["WP_APP_PASSWORD"],
                 title=title, markdown_body=final_md, slug=seo.get("slug", ""),
@@ -289,7 +297,7 @@ def _handle_gap(cfg, t):
     else:
         print("WordPress not configured - local file only.")
 
-    _log_to_sheet(cfg, t, edit_link or str(local_path), images.get("source", ""), len(flags), draft_result["word_count"])
+    _log_to_sheet(cfg, t, edit_link or str(local_path), images.get("source", ""), len(flags), final_count)
 
 
 def _handle_revival(cfg, t):
